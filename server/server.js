@@ -8,7 +8,8 @@ dotenv.config({ path: path.join(__dirname, '..', '.env') });
 import express from 'express';
 import cors from 'cors';
 import http from 'http';
-import { initDatabase } from './config/database.js';
+import { initDatabase, getDatabase } from './config/database.js';
+import { seed } from './seed.js';
 import { initWebSocket } from './websocket.js';
 import { startScheduler } from './scheduler.js';
 import apiRouter from './routes/api.js';
@@ -32,6 +33,14 @@ async function main() {
 
   // Initialize database
   await initDatabase();
+
+  // Auto-seed if database is empty (e.g. fresh Railway deploy)
+  const db = await getDatabase();
+  const metroCount = db.prepare('SELECT COUNT(*) as c FROM metros').get()?.c ?? 0;
+  if (metroCount === 0) {
+    console.log('Database empty - running seed...');
+    await seed();
+  }
 
   const app = express();
   const server = http.createServer(app);

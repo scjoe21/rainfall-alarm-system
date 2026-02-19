@@ -391,4 +391,9 @@ async function seedFromGeoJSON() {
   console.log(`seedFromGeoJSON: inserted ${insertedCount} EMDs with stations from GeoJSON`);
 }
 
-seed().catch(console.error);
+// Run when executed directly (node server/seed.js)
+if (process.argv[1]?.includes('seed.js')) {
+  seed().catch(console.error);
+}
+
+export { seed };
