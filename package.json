@@ -1,0 +1,16 @@
+{
+  "name": "rainfall-alarm-system",
+  "version": "1.0.0",
+  "description": "실시간 강우량 알람 시스템",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "node server/server.js",
+    "client": "npm run dev --prefix client",
+    "seed": "node server/seed.js",
+    "build": "npm install --prefix client && npm run build --prefix client",
+    "start": "node server/server.js"
+  },
+  "dependencies": {
+    "concurrently": "^8.2.0"
+  }
+}
