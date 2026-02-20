@@ -1,7 +1,7 @@
 import { callKmaApi } from './kmaAPI.js';
 import { getDatabase } from '../config/database.js';
 
-const ALERT_BASE_URL = 'http://apis.data.go.kr/1360000/WthrWrnInfoService';
+const ALERT_BASE_URL = 'https://apis.data.go.kr/1360000/WthrWrnInfoService';
 
 function isMockMode() { return process.env.MOCK_MODE === 'true'; }
 
@@ -107,7 +107,7 @@ export async function fetchWeatherAlerts() {
 
   const today = getKSTDateString();
   const commonParams = {
-    stnId: '108',
+    // stnId 미지정 → 전국 모든 지방청 발표 특보 조회
     fromTmFc: today,
     toTmFc: today,
     dataType: 'JSON',
@@ -121,15 +121,28 @@ export async function fetchWeatherAlerts() {
   try {
     const wrnData = await callKmaApi('getWthrWrnList', commonParams, ALERT_BASE_URL);
     const wrnItems = wrnData?.response?.body?.items?.item || [];
-    for (const item of (Array.isArray(wrnItems) ? wrnItems : [wrnItems])) {
-      if (!item?.t2) continue;
-      const lines = item.t2.split('\n').map(l => l.trim()).filter(Boolean);
+    const itemArray = Array.isArray(wrnItems) ? wrnItems : [wrnItems];
+
+    // 오늘 여러 차례 발표된 특보 중 가장 최신 공문만 파싱한다.
+    // 과거 공문(비가 왔을 때)까지 누적하면 이미 해제된 지역을 여전히
+    // 특보 중으로 잘못 인식하는 오류가 발생하기 때문이다.
+    itemArray.sort((a, b) => {
+      const aTime = parseInt(a.tmFc || '0', 10);
+      const bTime = parseInt(b.tmFc || '0', 10);
+      return bTime - aTime; // 내림차순: 최신 공문이 첫 번째
+    });
+
+    const latestItem = itemArray[0];
+    if (latestItem?.t2) {
+      const lines = latestItem.t2.split('\n').map(l => l.trim()).filter(Boolean);
       for (const line of lines) {
         const parsed = parseAlertTitle(line); // 주의보/경보만 매칭
         if (parsed) results.push(parsed);
       }
+      console.log(`  [Alert] Latest bulletin tmFc=${latestItem.tmFc}, found ${results.length} rain alert(s)`);
+    } else {
+      console.log(`  [Alert] No bulletin for today`);
     }
-    console.log(`  [Alert] Found ${results.length} rain alert(s) (주의보/경보)`);
     return { alerts: results, hasError: false };
   } catch (err) {
     console.error('  [Alert] getWthrWrnList error:', err.message);
@@ -194,8 +207,21 @@ export async function updateAlertState() {
 }
 
 // ACTIVE 시 해당 metro의 관측소만 쿼리
+// 특보 API 인증 실패(consecutiveErrors > 0) 시: 전체 관측소 폴백 폴링
 export async function getStationsToPoll() {
   const db = await getDatabase();
+
+  // 특보 API 지속 실패 → 전체 관측소 대상으로 직접 폴링 (폴백)
+  // PTY 체크가 있으므로 실제 강수 없으면 알람이 발생하지 않아 안전
+  if (alertState.consecutiveErrors > 0) {
+    const stations = db.prepare(`
+      SELECT ws.*, e.code as emd_code, e.name as emd_name, e.district_id
+      FROM weather_stations ws
+      JOIN emds e ON ws.emd_id = e.id
+    `).all();
+    console.log(`  [Alert] Fallback mode: polling all ${stations.length} stations (alert API unavailable)`);
+    return stations;
+  }
 
   if (alertState.level === 'IDLE' || alertState.affectedMetroIds.length === 0) {
     return [];

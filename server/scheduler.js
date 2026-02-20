@@ -8,7 +8,7 @@ import {
   getCurrentAlertState,
 } from './services/weatherAlertService.js';
 
-const BATCH_SIZE = 10;
+const BATCH_SIZE = 5;
 
 // 간격 설정 (밀리초)
 const ALERT_CHECK_IDLE = 30 * 60 * 1000;   // 30분
@@ -60,6 +60,11 @@ async function runAlertCheck() {
       const backoffMin = (backoff / 60000).toFixed(1);
       console.warn(`  [Scheduler] Alert API error - retry in ${backoffMin}min (attempt ${state.consecutiveErrors})`);
       scheduleAlertCheck(backoff);
+      // 특보 API 실패 시에도 강우 폴링 시작 (getStationsToPoll이 전체 관측소 반환)
+      if (!rainfallPollTimer) {
+        console.log('  [Scheduler] Starting fallback full-poll mode');
+        runRainfallCheck();
+      }
       return;
     }
 
@@ -102,7 +107,8 @@ function chunk(arr, n) {
 
 export async function runRainfallCheck() {
   const currentState = getCurrentAlertState();
-  if (currentState.level !== 'ACTIVE') {
+  const isFallback = currentState.consecutiveErrors > 0;
+  if (currentState.level !== 'ACTIVE' && !isFallback) {
     console.log('  [Rainfall] Skipped - not in ACTIVE state');
     return;
   }
@@ -142,7 +148,11 @@ export async function runRainfallCheck() {
 
     const batches = chunk(gridEntries, BATCH_SIZE);
 
-    for (const batch of batches) {
+    for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+      const batch = batches[batchIdx];
+      // 첫 배치 제외, 배치 간 500ms 딜레이 (KMA API 429 방지)
+      if (batchIdx > 0) await new Promise(r => setTimeout(r, 500));
+
       const realtimeResults = await Promise.allSettled(
         batch.map(async ([key, group]) => {
           const realtime15min = await getAWSRealtime15min(

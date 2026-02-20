@@ -29,15 +29,6 @@ function getDistrictCenter(districtCode) {
   return METRO_CENTERS[metroPrefix] || [36.5, 127.5];
 }
 
-// 강우량 → 색상
-function getRainfallColor(total) {
-  if (total >= 55) return '#dc2626';
-  if (total >= 40) return '#f97316';
-  if (total >= 20) return '#fbbf24';
-  if (total > 0) return '#60a5fa';
-  return '#e2e8f0';
-}
-
 // GeoJSON 로드 후 맵 범위 맞춤
 function FitBounds({ geojson, fallbackCenter }) {
   const map = useMap();
@@ -68,6 +59,8 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
   const geoJsonRef = useRef(null);
   const layerMapRef = useRef({});
   const timeoutIdsRef = useRef([]);
+  // 지역별 알람 타이머 관리: 이미 깜빡이는 중인 emd는 타이머를 재설정하지 않음
+  const alarmTimersRef = useRef({});
 
   const fallbackCenter = getDistrictCenter(districtCode);
 
@@ -148,14 +141,23 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
     });
 
     socket.on('alarm', alarm => {
-      setAlarmEmds(prev => new Set([...prev, alarm.emdCode]));
+      const emdCode = alarm.emdCode;
+      // 이미 이 지역에 5분 타이머가 걸려 있으면 타이머를 재설정하지 않음.
+      // 스케줄러가 5분마다 알람을 재전송해도 첫 수신 시점부터 딱 5분만 깜빡임.
+      if (alarmTimersRef.current[emdCode]) return;
+
+      setAlarmEmds(prev => new Set([...prev, emdCode]));
+
       const tid = setTimeout(() => {
         setAlarmEmds(prev => {
           const next = new Set(prev);
-          next.delete(alarm.emdCode);
+          next.delete(emdCode);
           return next;
         });
+        delete alarmTimersRef.current[emdCode];
       }, 5 * 60 * 1000);
+
+      alarmTimersRef.current[emdCode] = tid;
       timeoutIdsRef.current.push(tid);
     });
 
@@ -163,6 +165,7 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
       socket.disconnect();
       timeoutIdsRef.current.forEach(clearTimeout);
       timeoutIdsRef.current = [];
+      alarmTimersRef.current = {};
     };
   }, [districtId, metroId, isMetroMode]);
 
@@ -191,9 +194,9 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
       };
     }
 
-    const total = data.total_60min || 0;
+    // 알람 기준 미달 지역: 단일 기본색 (강수 단계 구분 없음)
     return {
-      fillColor: getRainfallColor(total),
+      fillColor: '#e2e8f0',
       fillOpacity: 0.65,
       weight: 1.5,
       color: '#475569',
@@ -271,10 +274,6 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
           )}
         </div>
         <div className="flex flex-wrap gap-4 mt-2">
-          <div className="legend-item"><div className="legend-color" style={{ background: '#e2e8f0' }}></div>강수없음</div>
-          <div className="legend-item"><div className="legend-color" style={{ background: '#60a5fa' }}></div>0~20mm</div>
-          <div className="legend-item"><div className="legend-color" style={{ background: '#fbbf24' }}></div>20~40mm</div>
-          <div className="legend-item"><div className="legend-color" style={{ background: '#f97316' }}></div>40~55mm</div>
           <div className="legend-item"><div className="legend-color blink-demo" style={{ background: '#dc2626' }}></div>55mm+ 알람</div>
           <div className="legend-item"><div className="legend-color legend-no-station"></div>관측소 없음</div>
         </div>

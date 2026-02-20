@@ -200,4 +200,16 @@ router.post('/debug/trigger-alarm', (req, res) => {
   res.json({ ok: true, triggered: { emdCode, districtId, realtime, forecast, total } });
 });
 
+// 알람 로그 전체 초기화 (허위 알람 발생 시 수동 정리용)
+// POST /api/debug/clear-alarms
+router.post('/debug/clear-alarms', async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ error: 'Forbidden in production' });
+  }
+  const db = await getDatabase();
+  db.prepare('DELETE FROM alarm_logs').run();
+  console.log('[Debug] alarm_logs cleared by manual request');
+  res.json({ ok: true, message: 'All alarm_logs cleared' });
+});
+
 export default router;

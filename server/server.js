@@ -42,6 +42,11 @@ async function main() {
     await seed();
   }
 
+  // 서버 시작 시 alarm_logs 초기화
+  // 재시작 전에 발생한 오탐(False Positive) 알람 로그를 제거하여 클린 상태로 시작
+  db.prepare('DELETE FROM alarm_logs').run();
+  console.log('Alarm logs cleared on startup');
+
   const app = express();
   const server = http.createServer(app);
 

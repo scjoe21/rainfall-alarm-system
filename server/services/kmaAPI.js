@@ -203,7 +203,18 @@ export async function getAWSRealtime15min(stnId, lat, lon) {
       return 0;
     }
 
-    const items = body.items.item || [];
+    const rawItems = body.items.item || [];
+    const items = Array.isArray(rawItems) ? rawItems : [rawItems];
+
+    // PTY: 강수형태 (0=없음, 1=비, 2=비/눈, 3=눈, 5=빗방울, 6=빗방울눈날림, 7=눈날림)
+    // 관측 시점에 PTY=0이면 현재 강수 없음 → RN1에 이전 시간 잔류값이 있어도 0 반환
+    // 이 처리가 없으면 비가 그친 후에도 RN1 누적값으로 인해 허위 알람이 발생함
+    const ptyItem = items.find(i => i.category === 'PTY');
+    if (!ptyItem || ptyItem.obsrValue === '0') {
+      console.log(`  [API] PTY=${ptyItem?.obsrValue ?? 'N/A'} → 강수없음, RN1 무시 (${nx},${ny})`);
+      return 0;
+    }
+
     // RN1: 1시간 강수량 (mm)
     const rn1Item = items.find(i => i.category === 'RN1');
     if (!rn1Item) {
@@ -217,9 +228,7 @@ export async function getAWSRealtime15min(stnId, lat, lon) {
     const rainfall = parseFloat(val) || 0;
     if (rainfall < 0) return 0; // 결측값 (-999, -998.9 등) 필터
 
-    // 1시간 강수량을 15분 기준으로: 실제 15분 데이터는 없으므로
-    // 보수적으로 1시간 값 자체를 사용 (더 높은 경보 감도)
-    console.log(`  [API] RN1=${rainfall}mm for (${nx},${ny})`);
+    console.log(`  [API] PTY=${ptyItem.obsrValue}, RN1=${rainfall}mm for (${nx},${ny})`);
     return +rainfall.toFixed(1);
   } catch (err) {
     console.error(`  [API] Ultra short ncst error:`, err.message);
@@ -255,29 +264,41 @@ export async function getForecast45min(nx, ny) {
       return 0;
     }
 
-    const items = body.items.item || [];
+    const rawItems = body.items.item || [];
+    const items = Array.isArray(rawItems) ? rawItems : [rawItems];
 
-    // RN1 카테고리만 필터 - 1시간 강수량 예보
+    // RN1·PTY 카테고리 분리
     const rnItems = items.filter(i => i.category === 'RN1');
+    const ptyItems = items.filter(i => i.category === 'PTY');
 
     if (rnItems.length === 0) {
       console.log(`  [API] No RN1 forecast items`);
       return 0;
     }
 
-    // 가장 가까운 예보시간 3개 (각 1시간 단위이므로 첫 번째만 사용이 적합)
+    // 가장 가까운 예보시간의 PTY 확인
+    // PTY=0이면 해당 시간대에 강수 없음 → RN1 잔류값이 있어도 0 반환
+    // (관측 PTY와 동일한 원칙: 현재 강수 없으면 누적값 무시)
+    const firstRn1 = rnItems[0];
+    const matchingPty = ptyItems.find(
+      p => p.fcstDate === firstRn1.fcstDate && p.fcstTime === firstRn1.fcstTime
+    );
+    if (matchingPty && matchingPty.fcstValue === '0') {
+      console.log(`  [API] Forecast PTY=0 at ${firstRn1.fcstTime} → 강수없음 예보, RN1 무시 (${nx},${ny})`);
+      return 0;
+    }
+
     // 초단기예보는 1시간 단위 6시간까지 제공
     // 45분 예측: 가장 가까운 1개 시간대의 RN1값 사용
     let total = 0;
-    const firstFcst = rnItems[0];
-    if (firstFcst) {
-      const val = firstFcst.fcstValue;
+    if (firstRn1) {
+      const val = firstRn1.fcstValue;
       if (val !== '강수없음' && val !== null) {
         total = parseFloat(val) || 0;
       }
     }
 
-    console.log(`  [API] Forecast RN1=${total}mm for (${nx},${ny}), ${rnItems.length} items`);
+    console.log(`  [API] Forecast PTY=${matchingPty?.fcstValue ?? 'N/A'}, RN1=${total}mm for (${nx},${ny})`);
     return +total.toFixed(1);
   } catch (err) {
     console.error(`  [API] Ultra short fcst error:`, err.message);
