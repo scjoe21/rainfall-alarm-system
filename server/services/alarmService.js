@@ -2,7 +2,7 @@ import { getDatabase } from '../config/database.js';
 import kma from './kmaAPI.js';
 
 const REALTIME_THRESHOLD = 20.0;
-const TOTAL_THRESHOLD = 55.0;
+const FORECAST_THRESHOLD = 55.0;
 
 // 격자좌표별 예보 캐시 (동일 실행 사이클 내에서만 유효)
 let forecastCache = {};
@@ -13,6 +13,9 @@ export function clearForecastCache() {
 
 /**
  * 알람 조건 체크
+ * - 조건 1: 15분 실시간 강우량 > 20mm
+ * - 조건 2: 초단기예보 시간당 강수량 >= 55mm
+ * 두 조건을 동시에 만족할 때 알람 발동
  * @param {Object} station - 관측소 정보
  * @param {number|null} preloadedRealtime - 이미 조회된 실시간 강우량 (null이면 직접 조회)
  * @param {number|null} preloadedNx - 이미 계산된 격자 X좌표
@@ -33,41 +36,38 @@ export async function checkAlarmCondition(station, preloadedRealtime = null, pre
 
   // 조건 1: 15분 실시간 > 20mm 아니면 스킵
   if (realtime15min <= REALTIME_THRESHOLD) {
-    return { realtime15min, forecast45min: 0, total60min: realtime15min, alarm: false, forecastCalled: false };
+    return { realtime15min, forecastHourly: 0, alarm: false, forecastCalled: false };
   }
 
   // 2. 격자 좌표
   const nx = preloadedNx !== null ? preloadedNx : kma.convertToGrid(station.lat, station.lon).nx;
   const ny = preloadedNy !== null ? preloadedNy : kma.convertToGrid(station.lat, station.lon).ny;
 
-  // 3. 45분 예측 강우량 (격자좌표 캐시 활용)
+  // 3. 초단기 강수예측 시간당 강수량 (레이더 기반, 10분 갱신 / 격자좌표 캐시 활용)
   const gridKey = `${nx},${ny}`;
-  let forecast45min;
+  let forecastHourly;
   let forecastCalled = false;
 
   if (gridKey in forecastCache) {
-    forecast45min = forecastCache[gridKey];
+    forecastHourly = forecastCache[gridKey];
   } else {
-    forecast45min = await kma.getForecast45min(nx, ny);
-    forecastCache[gridKey] = forecast45min;
+    forecastHourly = await kma.getVsrtForecastHourly(nx, ny);
+    forecastCache[gridKey] = forecastHourly;
     forecastCalled = true;
   }
 
-  // 4. 총 강우량 계산
-  const total60min = +(realtime15min + forecast45min).toFixed(1);
-
   // Save forecast data
   db.prepare(
-    'INSERT INTO rainfall_forecast (station_id, base_time, forecast_time, rainfall_forecast) VALUES (?, datetime("now"), datetime("now", "+45 minutes"), ?)'
-  ).run(station.id, forecast45min);
+    'INSERT INTO rainfall_forecast (station_id, base_time, forecast_time, rainfall_forecast) VALUES (?, datetime("now"), datetime("now", "+1 hour"), ?)'
+  ).run(station.id, forecastHourly);
 
-  // 조건 2: 총 60분 > 55mm
+  // 조건 2: 초단기예보 시간당 강수량 >= 55mm
   // 알람 이력은 DB에 저장하지 않음 (실시간 표시 4분 50초 후 자동 만료)
-  if (total60min > TOTAL_THRESHOLD) {
-    return { realtime15min, forecast45min, total60min, alarm: true, forecastCalled };
+  if (forecastHourly >= FORECAST_THRESHOLD) {
+    return { realtime15min, forecastHourly, alarm: true, forecastCalled };
   }
 
-  return { realtime15min, forecast45min, total60min, alarm: false, forecastCalled };
+  return { realtime15min, forecastHourly, alarm: false, forecastCalled };
 }
 
 export async function getAlarmsByDistrict(districtId, limit = 20) {
@@ -109,8 +109,7 @@ export async function getLatestRainfallByDistrict(districtId) {
       e.name as emd_name,
       ws.name as station_name,
       COALESCE(rr.rainfall_15min, 0) as realtime_15min,
-      COALESCE(rf.rainfall_forecast, 0) as forecast_45min,
-      COALESCE(rr.rainfall_15min, 0) + COALESCE(rf.rainfall_forecast, 0) as total_60min
+      COALESCE(rf.rainfall_forecast, 0) as forecast_hourly
     FROM emds e
     LEFT JOIN weather_stations ws ON ws.emd_id = e.id
     LEFT JOIN rainfall_realtime rr ON rr.station_id = ws.id

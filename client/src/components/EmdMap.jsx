@@ -111,8 +111,7 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
         rainfall.forEach(item => {
           map[item.emd_code] = {
             realtime_15min: item.realtime_15min,
-            forecast_45min: item.forecast_45min,
-            total_60min: item.total_60min,
+            forecast_hourly: item.forecast_hourly,
             station_name: item.station_name || null,
           };
         });
@@ -217,16 +216,14 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
       tooltipContent = `<div style="font-size:13px;line-height:1.5">
           <strong>${emdName}</strong><br/>
           관측소: ${data.station_name}<br/>
-          실시간: ${data.realtime_15min.toFixed(1)}mm<br/>
-          예측: ${data.forecast_45min.toFixed(1)}mm<br/>
-          총계: <b>${data.total_60min.toFixed(1)}mm</b>
+          실시간 15분: ${data.realtime_15min.toFixed(1)}mm<br/>
+          시간당 예보: <b>${data.forecast_hourly.toFixed(1)}mm/hr</b>
         </div>`;
     } else if (data) {
       tooltipContent = `<div style="font-size:13px;line-height:1.5">
           <strong>${emdName}</strong><br/>
-          실시간: ${data.realtime_15min.toFixed(1)}mm<br/>
-          예측: ${data.forecast_45min.toFixed(1)}mm<br/>
-          총계: <b>${data.total_60min.toFixed(1)}mm</b>
+          실시간 15분: ${data.realtime_15min.toFixed(1)}mm<br/>
+          시간당 예보: <b>${data.forecast_hourly.toFixed(1)}mm/hr</b>
         </div>`;
     } else {
       tooltipContent = `<div style="font-size:13px;line-height:1.5">
@@ -274,7 +271,7 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
           )}
         </div>
         <div className="flex flex-wrap gap-4 mt-2">
-          <div className="legend-item"><div className="legend-color blink-demo" style={{ background: '#dc2626' }}></div>55mm+ 알람</div>
+          <div className="legend-item"><div className="legend-color blink-demo" style={{ background: '#dc2626' }}></div>15분↑20mm &amp; 예보↑55mm/hr 알람</div>
           <div className="legend-item"><div className="legend-color legend-no-station"></div>관측소 없음</div>
         </div>
       </div>

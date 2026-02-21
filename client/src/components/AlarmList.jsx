@@ -39,7 +39,7 @@ function AlarmList({ districtId, metroId }) {
           경보 발생 지역
         </h3>
         <p className="text-sm text-red-500 mt-1">
-          15분 실시간 &gt; 20mm 이면서 60분 총계 &gt; 55mm
+          15분 실시간 &gt; 20mm 이면서 시간당 예보 ≥ 55mm
         </p>
       </div>
 
@@ -67,15 +67,9 @@ function AlarmList({ districtId, metroId }) {
                     </span>
                   </div>
                   <div>
-                    예측 45분:{' '}
-                    <span className="font-semibold text-yellow-600">
-                      {(alarm.forecast_45min ?? alarm.forecast45min)?.toFixed?.(1) ?? '-'}mm
-                    </span>
-                  </div>
-                  <div>
-                    총계 60분:{' '}
+                    시간당 예보:{' '}
                     <span className="font-bold text-red-600">
-                      {(alarm.total_60min ?? alarm.total60min)?.toFixed?.(1) ?? '-'}mm
+                      {(alarm.forecast_hourly ?? alarm.forecastHourly)?.toFixed?.(1) ?? '-'}mm/hr
                     </span>
                   </div>
                 </div>

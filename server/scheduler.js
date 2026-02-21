@@ -1,7 +1,7 @@
 import { getDatabase } from './config/database.js';
 import { checkAlarmCondition, clearForecastCache } from './services/alarmService.js';
 import { emitAlarm, emitAlarmCounts, emitAlertState } from './websocket.js';
-import { convertToGrid, getAWSRealtime15min } from './services/kmaAPI.js';
+import { convertToGrid, getAWSRealtime15min, clearVsrtGridCache } from './services/kmaAPI.js';
 import {
   updateAlertState,
   getStationsToPoll,
@@ -126,6 +126,7 @@ export async function runRainfallCheck() {
     }
 
     clearForecastCache();
+    clearVsrtGridCache(); // VSRT 전국 격자 캐시 초기화 (폴링 사이클마다 최신 데이터 사용)
 
     // 1단계: 격자좌표별 그룹핑
     const gridGroups = {};
@@ -184,13 +185,12 @@ export async function runRainfallCheck() {
                 districtId: station.district_id,
                 metroId: station.metro_id,
                 realtime15min: alarmResult.realtime15min,
-                forecast45min: alarmResult.forecast45min,
-                total60min: alarmResult.total60min,
+                forecastHourly: alarmResult.forecastHourly,
                 timestamp: new Date().toISOString(),
               };
               alarms.push(alarm);
               emitAlarm(alarm);
-              console.log(`  ALARM: ${station.emd_name} - 15min: ${alarmResult.realtime15min}mm, total: ${alarmResult.total60min}mm`);
+              console.log(`  ALARM: ${station.emd_name} - 15min: ${alarmResult.realtime15min}mm, hourly forecast: ${alarmResult.forecastHourly}mm`);
             }
           } catch (err) {
             console.error(`  Station ${station.stn_id} error:`, err.message);

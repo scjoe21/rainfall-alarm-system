@@ -1,9 +1,11 @@
 import axios from 'axios';
 
 const BASE_URL = 'https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0';
+const APIHUB_BASE_URL = 'https://apihub.kma.go.kr/api/typ01/cgi-bin/url';
 
 // env 변수를 호출 시점에 읽음 (ES module import 순서 문제 방지)
 function getApiKey() { return process.env.KMA_API_KEY; }
+function getApihubKey() { return process.env.KMA_APIHUB_KEY; }
 function isMockMode() { return process.env.MOCK_MODE === 'true'; }
 function getDailyLimit() { return parseInt(process.env.KMA_DAILY_LIMIT) || 10000; }
 
@@ -310,8 +312,161 @@ export async function getForecast45min(nx, ny) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────
+// 초단기 강수예측 (레이더 기반, 10분 갱신) - apihub.kma.go.kr
+// ─────────────────────────────────────────────────────────────
+
+// 전국 격자 캐시: 한 폴링 사이클에서 1회 API 호출로 전국 데이터 확보
+let vsrtGridCache = null; // { tmfc, tmef, grid: Map<'nx,ny', {rn1, pty}> }
+
+export function clearVsrtGridCache() {
+  vsrtGridCache = null;
+}
+
+// VSRT 발표시각: 10분 간격, 10분 여유(API 반영 지연)
+function getVsrtBaseTime() {
+  const kst = getKSTNow();
+  let h = kst.getUTCHours();
+  let m = kst.getUTCMinutes() - 10; // 10분 여유
+  if (m < 0) {
+    m += 60;
+    h -= 1;
+    if (h < 0) {
+      h = 23;
+      kst.setUTCDate(kst.getUTCDate() - 1);
+    }
+  }
+  m = Math.floor(m / 10) * 10; // 10분 단위로 내림
+  return formatDate(kst) + String(h).padStart(2, '0') + String(m).padStart(2, '0');
+}
+
+// 발효시각: 향후 60분에 해당하는 다음 정시
+function getVsrtEffectiveTime() {
+  const kst = getKSTNow();
+  const nextHour = new Date(kst.getTime() + 60 * 60 * 1000);
+  return formatDate(nextHour) + String(nextHour.getUTCHours()).padStart(2, '0');
+}
+
+// 응답 텍스트 파싱 → Map<'nx,ny', {rn1, pty}>
+// 기상청 apihub 텍스트 형식: 주석(#)을 제외한 행 = 공백 구분 컬럼
+// 헤더 예시: # TM_FC TM_EF  NX   NY  RN1  PTY
+// 데이터 예시: 202403011020 2024030111  79 133  2.5  1
+function parseVsrtGridText(text) {
+  const grid = new Map();
+  const lines = text.split('\n');
+
+  let colNx = -1, colNy = -1, colRn1 = -1, colPty = -1;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    if (trimmed.startsWith('#')) {
+      // 컬럼 헤더 감지
+      const tokens = trimmed.replace(/^#+\s*/, '').trim().split(/\s+/);
+      tokens.forEach((t, i) => {
+        switch (t.toUpperCase()) {
+          case 'NX': colNx = i; break;
+          case 'NY': colNy = i; break;
+          case 'RN1': colRn1 = i; break;
+          case 'PTY': colPty = i; break;
+        }
+      });
+      continue;
+    }
+
+    const parts = trimmed.split(/\s+/);
+
+    let nx, ny, rn1, pty;
+    if (colNx >= 0 && colNy >= 0 && colRn1 >= 0 && parts.length > colRn1) {
+      // 헤더에서 컬럼 위치 파악된 경우
+      nx  = parseInt(parts[colNx]);
+      ny  = parseInt(parts[colNy]);
+      rn1 = parseFloat(parts[colRn1]) || 0;
+      pty = colPty >= 0 && parts.length > colPty ? parseInt(parts[colPty]) : -1;
+    } else if (parts.length >= 5) {
+      // 헤더 없이 기본 가정: TM_FC TM_EF NX NY RN1 [PTY]
+      nx  = parseInt(parts[2]);
+      ny  = parseInt(parts[3]);
+      rn1 = parseFloat(parts[4]) || 0;
+      pty = parts.length >= 6 ? parseInt(parts[5]) : -1;
+    } else {
+      continue;
+    }
+
+    if (isNaN(nx) || isNaN(ny)) continue;
+    if (rn1 < 0) rn1 = 0; // 결측값(-999 등) 처리
+    grid.set(`${nx},${ny}`, { rn1, pty });
+  }
+
+  return grid;
+}
+
+/**
+ * 초단기 강수예측 (레이더 기반, 10분 갱신) - 향후 60분 시간당 강수량 조회
+ * - apihub.kma.go.kr nph-dfs_vsrt_grd 사용
+ * - 전국 격자를 1회 fetch 후 캐시하여 API 호출 최소화
+ * - KMA_APIHUB_KEY 미설정 시 기존 getUltraSrtFcst(30분 갱신)로 폴백
+ */
+export async function getVsrtForecastHourly(nx, ny) {
+  if (isMockMode()) {
+    return generateMockForecast();
+  }
+
+  const apihubKey = getApihubKey();
+  if (!apihubKey || apihubKey.startsWith('여기에')) {
+    return getForecast45min(nx, ny);
+  }
+
+  const tmfc = getVsrtBaseTime();
+  const tmef = getVsrtEffectiveTime();
+  const gridKey = `${nx},${ny}`;
+
+  // 캐시 히트: 같은 발표시각이면 전국 격자 재사용
+  if (vsrtGridCache && vsrtGridCache.tmfc === tmfc && vsrtGridCache.tmef === tmef) {
+    const val = vsrtGridCache.grid.get(gridKey);
+    if (!val) return 0;
+    if (val.pty === 0) return 0;
+    return +val.rn1.toFixed(1);
+  }
+
+  // 전국 격자 fetch (폴링 사이클당 1회)
+  try {
+    console.log(`  [API] nph-dfs_vsrt_grd: tmfc=${tmfc}, tmef=${tmef} (전국 격자 fetch)`);
+
+    const res = await axios.get(`${APIHUB_BASE_URL}/nph-dfs_vsrt_grd`, {
+      params: { tmfc, tmef, vars: 'RN1:PTY', authKey: apihubKey },
+      timeout: 30000,
+      responseType: 'text',
+    });
+
+    const grid = parseVsrtGridText(res.data);
+    vsrtGridCache = { tmfc, tmef, grid };
+
+    console.log(`  [API] VSRT grid loaded: ${grid.size} points`);
+
+    const val = grid.get(gridKey);
+    if (!val) {
+      console.warn(`  [API] VSRT (${nx},${ny}) not found in grid`);
+      return 0;
+    }
+    if (val.pty === 0) {
+      console.log(`  [API] VSRT PTY=0 → 강수없음 예보 (${nx},${ny})`);
+      return 0;
+    }
+    console.log(`  [API] VSRT RN1=${val.rn1}mm for (${nx},${ny})`);
+    return +val.rn1.toFixed(1);
+
+  } catch (err) {
+    console.error(`  [API] VSRT error:`, err.message, '→ fallback to getUltraSrtFcst');
+    return getForecast45min(nx, ny);
+  }
+}
+
 export default {
   convertToGrid,
   getAWSRealtime15min,
   getForecast45min,
+  getVsrtForecastHourly,
+  clearVsrtGridCache,
 };

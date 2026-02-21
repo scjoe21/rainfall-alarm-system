@@ -183,21 +183,19 @@ router.post('/debug/trigger-alarm', (req, res) => {
     return res.status(403).json({ error: 'Forbidden in production' });
   }
 
-  const { emdCode, districtId, realtime = 25, forecast = 35 } = req.body;
+  const { emdCode, districtId, realtime = 25, forecast = 60 } = req.body;
   if (!emdCode || !districtId) {
     return res.status(400).json({ error: 'emdCode and districtId are required' });
   }
 
-  const total = +((realtime + forecast).toFixed(1));
   emitAlarm({
     emdCode,
     districtId: Number(districtId),
     realtime15min: realtime,
-    forecast45min: forecast,
-    total60min: total,
+    forecastHourly: forecast,
   });
 
-  res.json({ ok: true, triggered: { emdCode, districtId, realtime, forecast, total } });
+  res.json({ ok: true, triggered: { emdCode, districtId, realtime15min: realtime, forecastHourly: forecast } });
 });
 
 // 알람 로그 전체 초기화 (허위 알람 발생 시 수동 정리용)
