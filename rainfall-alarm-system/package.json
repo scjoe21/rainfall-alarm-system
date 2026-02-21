@@ -1,0 +1,23 @@
+{
+  "name": "rainfall-alarm-system",
+  "version": "1.0.0",
+  "description": "실시간 강우량 알람 시스템",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "node server/server.js",
+    "client": "npm run dev --prefix client",
+    "seed": "node server/seed.js",
+    "build": "npm install --prefix client && npm run build --prefix client",
+    "start": "node server/server.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "concurrently": "^8.2.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.0",
+    "express": "^4.18.0",
+    "node-cron": "^3.0.0",
+    "socket.io": "^4.6.0",
+    "sql.js": "^1.10.0"
+  }
+}

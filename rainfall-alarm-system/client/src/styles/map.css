@@ -1,0 +1,71 @@
+@import 'leaflet/dist/leaflet.css';
+
+.leaflet-container {
+  width: 100%;
+  height: 100%;
+  min-height: 500px;
+  border-radius: 0.5rem;
+}
+
+/* 범례의 알람 색상 깜빡임 데모 */
+@keyframes blink-demo {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.blink-demo {
+  animation: blink-demo 1s ease-in-out infinite;
+}
+
+/* Alarm badge pulse */
+@keyframes badge-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.2); }
+}
+
+.alarm-badge {
+  animation: badge-pulse 1s ease-in-out infinite;
+}
+
+/* Legend */
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+}
+
+.legend-color {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 0.25rem;
+  border: 1px solid #94a3b8;
+}
+
+.legend-no-station {
+  background: #f1f5f9;
+  border: 2px dashed #94a3b8;
+}
+
+/* 읍면동 이름 라벨 */
+.emd-label {
+  background: none !important;
+  border: none !important;
+  box-shadow: none !important;
+  text-align: center;
+}
+
+.emd-label span {
+  font-size: 11px;
+  font-weight: 600;
+  color: #1e293b;
+  text-shadow:
+    1px 1px 0 #fff,
+    -1px -1px 0 #fff,
+    1px -1px 0 #fff,
+    -1px 1px 0 #fff,
+    0 1px 0 #fff,
+    0 -1px 0 #fff;
+  white-space: nowrap;
+  pointer-events: none;
+}
