@@ -182,6 +182,7 @@ export async function runRainfallCheck() {
                 emdCode: station.emd_code,
                 emdName: station.emd_name,
                 districtId: station.district_id,
+                metroId: station.metro_id,
                 realtime15min: alarmResult.realtime15min,
                 forecast45min: alarmResult.forecast45min,
                 total60min: alarmResult.total60min,
@@ -198,32 +199,11 @@ export async function runRainfallCheck() {
       }
     }
 
-    // 3단계: 알람 카운트 업데이트
+    // 3단계: 오래된 데이터 정리
     const db = await getDatabase();
-    const metros = db.prepare('SELECT * FROM metros').all();
-    for (const metro of metros) {
-      const rows = db.prepare(`
-        SELECT d.id as district_id, COUNT(al.id) as alarm_count
-        FROM districts d
-        LEFT JOIN emds e ON e.district_id = d.id
-        LEFT JOIN alarm_logs al ON al.emd_id = e.id
-          AND al.timestamp > datetime('now', '-1 hour')
-        WHERE d.metro_id = ?
-        GROUP BY d.id
-      `).all(metro.id);
-
-      const counts = {};
-      for (const row of rows) {
-        counts[row.district_id] = row.alarm_count;
-      }
-      emitAlarmCounts(counts);
-    }
-
-    // 4단계: 오래된 데이터 정리
     try {
       db.prepare("DELETE FROM rainfall_realtime WHERE timestamp < datetime('now', '-24 hours')").run();
       db.prepare("DELETE FROM rainfall_forecast WHERE base_time < datetime('now', '-24 hours')").run();
-      db.prepare("DELETE FROM alarm_logs WHERE timestamp < datetime('now', '-7 days')").run();
     } catch (cleanupErr) {
       console.error('  Cleanup error:', cleanupErr.message);
     }

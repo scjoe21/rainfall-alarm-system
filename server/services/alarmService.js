@@ -62,11 +62,8 @@ export async function checkAlarmCondition(station, preloadedRealtime = null, pre
   ).run(station.id, forecast45min);
 
   // 조건 2: 총 60분 > 55mm
+  // 알람 이력은 DB에 저장하지 않음 (실시간 표시 4분 50초 후 자동 만료)
   if (total60min > TOTAL_THRESHOLD) {
-    db.prepare(
-      'INSERT INTO alarm_logs (emd_id, station_id, realtime_15min, forecast_45min, total_60min) VALUES (?, ?, ?, ?, ?)'
-    ).run(station.emd_id, station.id, realtime15min, forecast45min, total60min);
-
     return { realtime15min, forecast45min, total60min, alarm: true, forecastCalled };
   }
 

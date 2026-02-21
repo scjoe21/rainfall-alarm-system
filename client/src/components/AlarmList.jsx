@@ -1,33 +1,36 @@
 import { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
 
+const ALARM_DURATION_MS = 4 * 60 * 1000 + 50 * 1000; // 4분 50초
+
 function AlarmList({ districtId, metroId }) {
   const [alarms, setAlarms] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  const apiUrl = metroId
-    ? `/api/alarms/metro/${metroId}?limit=20`
-    : `/api/alarms/${districtId}?limit=20`;
 
   useEffect(() => {
-    fetch(apiUrl)
-      .then(res => res.json())
-      .then(data => {
-        setAlarms(data);
-        setLoading(false);
-      })
-      .catch(err => {
-        console.error('Failed to load alarms:', err);
-        setLoading(false);
-      });
+    // 구독 지역이 바뀌면 목록 초기화
+    setAlarms([]);
 
     const socket = io();
+    const timers = [];
+
     socket.on('alarm', alarm => {
-      setAlarms(prev => [alarm, ...prev].slice(0, 50));
+      const alarmId = `${alarm.emdCode ?? alarm.emd_code}_${Date.now()}`;
+
+      setAlarms(prev => [{ ...alarm, _id: alarmId }, ...prev].slice(0, 20));
+
+      // 4분 50초 후 자동 만료
+      const tid = setTimeout(() => {
+        setAlarms(prev => prev.filter(a => a._id !== alarmId));
+      }, ALARM_DURATION_MS);
+
+      timers.push(tid);
     });
 
-    return () => socket.disconnect();
-  }, [apiUrl]);
+    return () => {
+      socket.disconnect();
+      timers.forEach(clearTimeout);
+    };
+  }, [districtId, metroId]);
 
   return (
     <div className="bg-white rounded-xl shadow-lg overflow-hidden">
@@ -41,20 +44,16 @@ function AlarmList({ districtId, metroId }) {
       </div>
 
       <div className="p-4 max-h-[500px] overflow-y-auto">
-        {loading ? (
-          <div className="flex justify-center py-8">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-red-500"></div>
-          </div>
-        ) : alarms.length === 0 ? (
+        {alarms.length === 0 ? (
           <div className="text-center py-8 text-gray-400">
             <p className="text-4xl mb-2">---</p>
             <p>현재 경보가 없습니다</p>
           </div>
         ) : (
           <div className="space-y-3">
-            {alarms.map((alarm, idx) => (
+            {alarms.map((alarm) => (
               <div
-                key={alarm.id || idx}
+                key={alarm._id}
                 className="border-l-4 border-red-500 pl-4 py-3 bg-red-50 rounded-r-lg"
               >
                 <div className="font-bold text-gray-800">

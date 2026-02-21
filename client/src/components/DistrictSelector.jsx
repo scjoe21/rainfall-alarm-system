@@ -1,32 +1,65 @@
 import { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
 
+const ALARM_DURATION_MS = 4 * 60 * 1000 + 50 * 1000; // 4분 50초
+
 function DistrictSelector({ metroId, metroName, onSelect }) {
   const [districts, setDistricts] = useState([]);
-  const [alarmCounts, setAlarmCounts] = useState({});
   const [loading, setLoading] = useState(true);
+  // { [districtId]: Set<emdCode> } — 현재 경보 중인 읍면동 목록 (기초 단위)
+  const [activeByDistrict, setActiveByDistrict] = useState({});
 
   useEffect(() => {
-    Promise.all([
-      fetch(`/api/metros/${metroId}/districts`).then(r => r.json()),
-      fetch(`/api/metros/${metroId}/alarm-counts`).then(r => r.json()),
-    ])
-      .then(([dists, counts]) => {
+    fetch(`/api/metros/${metroId}/districts`)
+      .then(r => r.json())
+      .then(dists => {
         setDistricts(dists);
-        setAlarmCounts(counts);
         setLoading(false);
       })
       .catch(err => {
         console.error('Failed to load districts:', err);
         setLoading(false);
       });
+  }, [metroId]);
 
+  useEffect(() => {
+    setActiveByDistrict({});
     const socket = io();
-    socket.on('alarm_counts', (counts) => {
-      setAlarmCounts(prev => ({ ...prev, ...counts }));
+    const timers = {};
+
+    socket.on('alarm', alarm => {
+      const districtId = alarm.districtId;
+      const emdCode = alarm.emdCode ?? alarm.emd_code;
+      if (!districtId || !emdCode) return;
+
+      const timerKey = `${districtId}_${emdCode}`;
+      if (timers[timerKey]) return;
+
+      setActiveByDistrict(prev => {
+        const next = { ...prev };
+        next[districtId] = new Set(next[districtId] ?? []);
+        next[districtId].add(emdCode);
+        return next;
+      });
+
+      timers[timerKey] = setTimeout(() => {
+        setActiveByDistrict(prev => {
+          const next = { ...prev };
+          if (!next[districtId]) return next;
+          const set = new Set(next[districtId]);
+          set.delete(emdCode);
+          if (set.size === 0) delete next[districtId];
+          else next[districtId] = set;
+          return next;
+        });
+        delete timers[timerKey];
+      }, ALARM_DURATION_MS);
     });
 
-    return () => socket.disconnect();
+    return () => {
+      socket.disconnect();
+      Object.values(timers).forEach(clearTimeout);
+    };
   }, [metroId]);
 
   if (loading) {
@@ -45,7 +78,7 @@ function DistrictSelector({ metroId, metroName, onSelect }) {
       <p className="text-gray-500 mb-6">모니터링할 지역을 선택하세요</p>
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
         {districts.map(district => {
-          const alarmCount = alarmCounts[district.id] || 0;
+          const alarmCount = activeByDistrict[district.id]?.size ?? 0;
           return (
             <button
               key={district.id}

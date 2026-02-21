@@ -209,8 +209,10 @@ export async function getAWSRealtime15min(stnId, lat, lon) {
     // PTY: 강수형태 (0=없음, 1=비, 2=비/눈, 3=눈, 5=빗방울, 6=빗방울눈날림, 7=눈날림)
     // 관측 시점에 PTY=0이면 현재 강수 없음 → RN1에 이전 시간 잔류값이 있어도 0 반환
     // 이 처리가 없으면 비가 그친 후에도 RN1 누적값으로 인해 허위 알람이 발생함
+    // PTY 항목 자체가 없거나, obsrValue가 문자열 '0' 또는 숫자 0인 경우 모두 강수 없음으로 처리
     const ptyItem = items.find(i => i.category === 'PTY');
-    if (!ptyItem || ptyItem.obsrValue === '0') {
+    const ptyValue = ptyItem ? parseInt(ptyItem.obsrValue ?? '0', 10) : 0;
+    if (!ptyItem || ptyValue === 0) {
       console.log(`  [API] PTY=${ptyItem?.obsrValue ?? 'N/A'} → 강수없음, RN1 무시 (${nx},${ny})`);
       return 0;
     }
@@ -278,13 +280,15 @@ export async function getForecast45min(nx, ny) {
 
     // 가장 가까운 예보시간의 PTY 확인
     // PTY=0이면 해당 시간대에 강수 없음 → RN1 잔류값이 있어도 0 반환
-    // (관측 PTY와 동일한 원칙: 현재 강수 없으면 누적값 무시)
+    // PTY 항목을 찾지 못한 경우에도 강수 없음으로 간주(보수적 판단)
+    // (관측 PTY와 동일한 원칙: 강수 여부 불확실하면 누적값 무시)
     const firstRn1 = rnItems[0];
     const matchingPty = ptyItems.find(
       p => p.fcstDate === firstRn1.fcstDate && p.fcstTime === firstRn1.fcstTime
     );
-    if (matchingPty && matchingPty.fcstValue === '0') {
-      console.log(`  [API] Forecast PTY=0 at ${firstRn1.fcstTime} → 강수없음 예보, RN1 무시 (${nx},${ny})`);
+    const forecastPtyValue = matchingPty ? parseInt(matchingPty.fcstValue ?? '0', 10) : 0;
+    if (!matchingPty || forecastPtyValue === 0) {
+      console.log(`  [API] Forecast PTY=${matchingPty?.fcstValue ?? 'N/A'} at ${firstRn1.fcstTime} → 강수없음 예보, RN1 무시 (${nx},${ny})`);
       return 0;
     }
 

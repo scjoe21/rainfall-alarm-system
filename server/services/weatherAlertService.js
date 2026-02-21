@@ -123,25 +123,42 @@ export async function fetchWeatherAlerts() {
     const wrnItems = wrnData?.response?.body?.items?.item || [];
     const itemArray = Array.isArray(wrnItems) ? wrnItems : [wrnItems];
 
-    // 오늘 여러 차례 발표된 특보 중 가장 최신 공문만 파싱한다.
-    // 과거 공문(비가 왔을 때)까지 누적하면 이미 해제된 지역을 여전히
-    // 특보 중으로 잘못 인식하는 오류가 발생하기 때문이다.
-    itemArray.sort((a, b) => {
-      const aTime = parseInt(a.tmFc || '0', 10);
-      const bTime = parseInt(b.tmFc || '0', 10);
-      return bTime - aTime; // 내림차순: 최신 공문이 첫 번째
-    });
-
-    const latestItem = itemArray[0];
-    if (latestItem?.t2) {
-      const lines = latestItem.t2.split('\n').map(l => l.trim()).filter(Boolean);
-      for (const line of lines) {
-        const parsed = parseAlertTitle(line); // 주의보/경보만 매칭
-        if (parsed) results.push(parsed);
+    // 지방기상청(stnId)별로 그룹핑하여 각 기관의 가장 최신 공문만 파싱한다.
+    //
+    // [이전 버그1] 전체 공문을 모두 누적하면, 해제 공문 이전의 발효 공문까지
+    //   포함되어 이미 해제된 지역을 여전히 특보 중으로 잘못 인식했음.
+    //
+    // [이전 버그2] 전역 최신 1건만 파싱하면, KMA 지방청(서울·부산·대구 등)이
+    //   각자 독립 공문을 발표하므로 다른 기관의 유효한 특보가 누락됨.
+    //   (예: 부산청이 오전에 호우주의보 발효 → 서울청이 오후에 해제 공문 발행
+    //        → 전역 최신이 서울 해제 공문이 되어 부산 특보를 놓침)
+    //
+    // [현재 방식] stnId 기준으로 그룹핑 후 각 기관의 최신 공문만 채택,
+    //   전 기관 결과를 합산하여 현재 유효한 특보 목록을 정확히 산출한다.
+    const latestByStn = {};
+    for (const item of itemArray) {
+      const stnKey = String(item.stnId ?? item.stn_id ?? 'national');
+      const currTime = parseInt(item.tmFc || '0', 10);
+      const prevTime = parseInt(latestByStn[stnKey]?.tmFc || '0', 10);
+      if (currTime > prevTime) {
+        latestByStn[stnKey] = item;
       }
-      console.log(`  [Alert] Latest bulletin tmFc=${latestItem.tmFc}, found ${results.length} rain alert(s)`);
-    } else {
+    }
+
+    const latestBulletins = Object.values(latestByStn);
+
+    if (latestBulletins.length === 0) {
       console.log(`  [Alert] No bulletin for today`);
+    } else {
+      for (const bulletin of latestBulletins) {
+        if (!bulletin?.t2) continue;
+        const lines = bulletin.t2.split('\n').map(l => l.trim()).filter(Boolean);
+        for (const line of lines) {
+          const parsed = parseAlertTitle(line); // 주의보/경보만 매칭
+          if (parsed) results.push(parsed);
+        }
+      }
+      console.log(`  [Alert] ${latestBulletins.length} regional bulletin(s) processed, found ${results.length} rain alert(s)`);
     }
     return { alerts: results, hasError: false };
   } catch (err) {
@@ -215,9 +232,10 @@ export async function getStationsToPoll() {
   // PTY 체크가 있으므로 실제 강수 없으면 알람이 발생하지 않아 안전
   if (alertState.consecutiveErrors > 0) {
     const stations = db.prepare(`
-      SELECT ws.*, e.code as emd_code, e.name as emd_name, e.district_id
+      SELECT ws.*, e.code as emd_code, e.name as emd_name, e.district_id, d.metro_id
       FROM weather_stations ws
       JOIN emds e ON ws.emd_id = e.id
+      JOIN districts d ON e.district_id = d.id
     `).all();
     console.log(`  [Alert] Fallback mode: polling all ${stations.length} stations (alert API unavailable)`);
     return stations;
@@ -229,7 +247,7 @@ export async function getStationsToPoll() {
 
   const placeholders = alertState.affectedMetroIds.map(() => '?').join(',');
   const stations = db.prepare(`
-    SELECT ws.*, e.code as emd_code, e.name as emd_name, e.district_id
+    SELECT ws.*, e.code as emd_code, e.name as emd_name, e.district_id, d.metro_id
     FROM weather_stations ws
     JOIN emds e ON ws.emd_id = e.id
     JOIN districts d ON e.district_id = d.id

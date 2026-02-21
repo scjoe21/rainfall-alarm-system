@@ -155,7 +155,7 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
           return next;
         });
         delete alarmTimersRef.current[emdCode];
-      }, 5 * 60 * 1000);
+      }, 4 * 60 * 1000 + 50 * 1000); // 4분 50초
 
       alarmTimersRef.current[emdCode] = tid;
       timeoutIdsRef.current.push(tid);
