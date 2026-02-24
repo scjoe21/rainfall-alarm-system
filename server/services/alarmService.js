@@ -27,7 +27,7 @@ export async function checkAlarmCondition(station, preloadedRealtime = null, pre
   // 1. 실시간 강우량: 전달받은 값 사용 또는 직접 조회
   const realtime15min = preloadedRealtime !== null
     ? preloadedRealtime
-    : await kma.getAWSRealtime15min(station.stn_id, station.lat, station.lon);
+    : await kma.getAWSRealtime15min(station.stn_id);
 
   // Save realtime data
   db.prepare(

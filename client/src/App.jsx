@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import MetroSelector from './components/MetroSelector';
 import DistrictSelector from './components/DistrictSelector';
-import EmdMap from './components/EmdMap';
+import StationList from './components/StationList';
 import AlarmList from './components/AlarmList';
 
 // 세종시는 기초자치단체 없이 바로 지도 표시
@@ -11,6 +11,8 @@ function App() {
   const [selectedMetro, setSelectedMetro] = useState(null);
   const [selectedDistrict, setSelectedDistrict] = useState(null);
   const [directMapMode, setDirectMapMode] = useState(false);
+  const [locating, setLocating] = useState(false);
+  const [locateError, setLocateError] = useState(null);
 
   const handleMetroSelect = (metro) => {
     setSelectedMetro(metro);
@@ -21,6 +23,41 @@ function App() {
     } else {
       setDirectMapMode(false);
     }
+  };
+
+  const handleLocate = () => {
+    if (!navigator.geolocation) {
+      setLocateError('이 브라우저는 위치 서비스를 지원하지 않습니다.');
+      return;
+    }
+    setLocating(true);
+    setLocateError(null);
+    navigator.geolocation.getCurrentPosition(
+      async ({ coords }) => {
+        try {
+          const res = await fetch(`/api/locate?lat=${coords.latitude}&lon=${coords.longitude}`);
+          if (!res.ok) throw new Error('위치 조회 실패');
+          const data = await res.json();
+          setSelectedMetro(data.metro);
+          if (DIRECT_MAP_METROS[data.metro.code]) {
+            setDirectMapMode(true);
+            setSelectedDistrict(null);
+          } else {
+            setDirectMapMode(false);
+            setSelectedDistrict(data.district);
+          }
+        } catch {
+          setLocateError('위치 기반 지역 조회에 실패했습니다.');
+        } finally {
+          setLocating(false);
+        }
+      },
+      () => {
+        setLocateError('위치 정보를 가져올 수 없습니다.');
+        setLocating(false);
+      },
+      { timeout: 10000 }
+    );
   };
 
   const handleBack = () => {
@@ -43,15 +80,34 @@ function App() {
           <h1 className="text-xl font-bold">
             실시간 강우량 알람 시스템
           </h1>
-          {selectedMetro && (
+          <div className="flex items-center gap-2">
             <button
-              onClick={handleBack}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm transition-colors"
+              onClick={handleLocate}
+              disabled={locating}
+              className="px-3 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 rounded-lg text-sm transition-colors flex items-center gap-1.5"
             >
-              뒤로가기
+              {locating ? (
+                <span className="inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <span>📍</span>
+              )}
+              현재 위치
             </button>
-          )}
+            {selectedMetro && (
+              <button
+                onClick={handleBack}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm transition-colors"
+              >
+                뒤로가기
+              </button>
+            )}
+          </div>
         </div>
+        {locateError && (
+          <div className="max-w-7xl mx-auto px-4 pb-2">
+            <p className="text-red-300 text-xs">{locateError}</p>
+          </div>
+        )}
         {/* Breadcrumb */}
         {selectedMetro && (
           <div className="max-w-7xl mx-auto px-4 pb-3 text-blue-200 text-sm">
@@ -89,17 +145,14 @@ function App() {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2">
               {directMapMode ? (
-                <EmdMap
+                <StationList
                   metroId={selectedMetro.id}
                   districtName={selectedMetro.name}
-                  districtCode={selectedMetro.code}
-                  isMetroMode={true}
                 />
               ) : (
-                <EmdMap
+                <StationList
                   districtId={selectedDistrict.id}
                   districtName={selectedDistrict.name}
-                  districtCode={selectedDistrict.code}
                 />
               )}
             </div>

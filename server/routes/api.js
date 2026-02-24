@@ -175,6 +175,37 @@ router.get('/districts/:districtId/emds', async (req, res) => {
   res.json(emds);
 });
 
+// 현재 위치(위도/경도)로 가장 가까운 관측소의 metro + district 반환
+router.get('/locate', async (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lon = parseFloat(req.query.lon);
+  if (isNaN(lat) || isNaN(lon)) {
+    return res.status(400).json({ error: 'lat and lon are required' });
+  }
+
+  const db = await getDatabase();
+  // 유클리드 거리 기준 최근접 관측소 조회 (한반도 범위 내 충분히 정확)
+  const row = db.prepare(`
+    SELECT
+      ws.lat AS stn_lat, ws.lon AS stn_lon,
+      d.id AS district_id, d.code AS district_code, d.name AS district_name,
+      m.id AS metro_id, m.code AS metro_code, m.name AS metro_name
+    FROM weather_stations ws
+    JOIN emds e ON ws.emd_id = e.id
+    JOIN districts d ON e.district_id = d.id
+    JOIN metros m ON d.metro_id = m.id
+    ORDER BY ((ws.lat - ?) * (ws.lat - ?)) + ((ws.lon - ?) * (ws.lon - ?))
+    LIMIT 1
+  `).get(lat, lat, lon, lon);
+
+  if (!row) return res.status(404).json({ error: 'No station found' });
+
+  res.json({
+    metro: { id: row.metro_id, code: row.metro_code, name: row.metro_name },
+    district: { id: row.district_id, code: row.district_code, name: row.district_name },
+  });
+});
+
 // 개발용: 특정 읍면동에 강제 알람 트리거 (production에서 비활성화)
 // POST /api/debug/trigger-alarm
 // body: { emdCode, districtId, realtime?, forecast? }

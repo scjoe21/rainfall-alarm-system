@@ -120,46 +120,20 @@ function formatTime(d) {
   return `${h}${m}`;
 }
 
-// 초단기예보 발표시각 계산 (매시 30분 발표, API 제공은 ~45분 소요)
-// base_time: 매시 30분. 현재 시각에서 가장 최근 발표시각 결정
-function getUltraSrtBaseTime() {
+// AWS 분단위 자료 조회 시각 (현재 KST에서 2분 여유)
+function getAWSTm() {
   const kst = getKSTNow();
-  let baseHour = kst.getUTCHours();
-  let baseMin = kst.getUTCMinutes();
-
-  // 초단기예보: 매시 30분 발표, API 제공 ~45분
-  // 현재 분이 45분 미만이면 이전 시간의 30분 발표 사용
-  if (baseMin < 45) {
-    baseHour -= 1;
-    if (baseHour < 0) {
-      baseHour = 23;
+  let h = kst.getUTCHours();
+  let m = kst.getUTCMinutes() - 2;
+  if (m < 0) {
+    m += 60;
+    h -= 1;
+    if (h < 0) {
+      h = 23;
       kst.setUTCDate(kst.getUTCDate() - 1);
     }
   }
-
-  const baseDate = formatDate(kst);
-  const baseTime = String(baseHour).padStart(2, '0') + '30';
-  return { baseDate, baseTime };
-}
-
-// 초단기실황 발표시각 계산 (매시 정각 발표, ~40분 소요)
-function getUltraSrtNcstBaseTime() {
-  const kst = getKSTNow();
-  let baseHour = kst.getUTCHours();
-  let baseMin = kst.getUTCMinutes();
-
-  // 초단기실황: 매시 정각 발표, API 제공 ~40분
-  if (baseMin < 40) {
-    baseHour -= 1;
-    if (baseHour < 0) {
-      baseHour = 23;
-      kst.setUTCDate(kst.getUTCDate() - 1);
-    }
-  }
-
-  const baseDate = formatDate(kst);
-  const baseTime = String(baseHour).padStart(2, '0') + '00';
-  return { baseDate, baseTime };
+  return formatDate(kst) + String(h).padStart(2, '0') + String(m).padStart(2, '0');
 }
 
 // Mock 데이터 생성
@@ -174,142 +148,133 @@ function generateMockForecast() {
   return +(Math.random() * 40).toFixed(1);
 }
 
-// 초단기실황 조회 - 현재 1시간 강수량 (RN1)
-// 이걸 15분 기준으로 환산: RN1 / 4 * 1 (15분 비율)
-// 또는 단순히 RN1 값 자체를 15분 대리값으로 사용
-export async function getAWSRealtime15min(stnId, lat, lon) {
+// ─────────────────────────────────────────────────────────────
+// AWS 전국 분단위 관측 (15분 강수량) - apihub.kma.go.kr
+// ─────────────────────────────────────────────────────────────
+
+// 전국 관측소 캐시: 폴링 사이클당 1회 API 호출
+let awsGridCache = null; // { tm, grid: Map<stn_id, rn15> }
+
+export function clearAWSGridCache() {
+  awsGridCache = null;
+}
+
+// 응답 텍스트 파싱 → Map<stn_id(string), rn15(mm)>
+// nph-aws2_min 응답 형식 (disp=1) — 실측 확인:
+//   헤더: # YYMMDDHHMI STN WD1 WS1 ... RN-15m RN-60m ...  (공백 구분, STN=col1, RN-15m=col10)
+//   단위: # KST ID deg m/s ... mm mm ...
+//   데이터: 202602242115,108,...,0.0,...,=    (쉼표 구분, 끝에 = 마커)
+//   전국 관측소: ~731개
+function parseAWSGridText(text) {
+  const grid = new Map();
+  const lines = text.split('\n');
+
+  // 실제 컬럼명: RN-15m (하이픈, 소문자 m) — 대소문자 무관 탐지
+  const RN15_CANDIDATES = ['RN-15M', 'RN_15M', 'RN15M', 'R15M', 'RN15', 'R_15M'];
+  let colStn = -1, colRn15 = -1;
+  let matchedRn15Col = null;
+  let headerLogged = false;
+  let firstDataLogged = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed === '#START7777' || trimmed === '#7777END') continue;
+
+    if (trimmed.startsWith('#')) {
+      // 헤더는 항상 공백 구분
+      const raw = trimmed.replace(/^#+\s*/, '').trim();
+      const tokens = raw.split(/\s+/);
+
+      tokens.forEach((t, i) => {
+        const upper = t.toUpperCase();
+        if (upper === 'STN' || upper === 'STN_ID') colStn = i;
+        if (RN15_CANDIDATES.includes(upper)) { colRn15 = i; matchedRn15Col = t; }
+      });
+
+      if (!headerLogged && colStn >= 0) {
+        console.log(`  [AWS parse] 컬럼 헤더: ${raw.slice(0, 120)}`);
+        console.log(`  [AWS parse] STN col=${colStn}, RN15 col=${colRn15} (매칭: ${matchedRn15Col ?? '미탐지'})`);
+        if (colRn15 < 0) {
+          console.warn(`  [AWS parse] ⚠ 15분 강수량 컬럼 미탐지. 전체 컬럼: ${tokens.join(' ')}`);
+        }
+        headerLogged = true;
+      }
+      continue;
+    }
+
+    if (colStn < 0 || colRn15 < 0) continue;
+
+    // 데이터 행: 쉼표 구분 (disp=1), 끝에 = 마커 포함 가능
+    const parts = trimmed.split(',').map(t => t.trim()).filter(t => t !== '=');
+
+    if (parts.length <= Math.max(colStn, colRn15)) continue;
+
+    const stn = parts[colStn];
+    const raw = parts[colRn15];
+    if (!stn || raw === '' || raw === '-' || raw === 'null') continue;
+
+    if (!firstDataLogged) {
+      console.log(`  [AWS parse] 첫 데이터: STN=${stn}, ${matchedRn15Col}=${raw}`);
+      firstDataLogged = true;
+    }
+
+    const rn15 = parseFloat(raw);
+    grid.set(String(stn), isNaN(rn15) || rn15 < 0 ? 0 : +rn15.toFixed(1));
+  }
+
+  return grid;
+}
+
+// 전국 AWS 분단위 자료 fetch (폴링 사이클당 1회)
+async function fetchAWSGrid() {
+  const apihubKey = getApihubKey();
+  if (!apihubKey) {
+    console.warn('  [API] KMA_APIHUB_KEY 미설정 - AWS 실측 조회 불가');
+    return null;
+  }
+
+  const tm = getAWSTm();
+
+  // 캐시 히트
+  if (awsGridCache && awsGridCache.tm === tm) {
+    return awsGridCache.grid;
+  }
+
+  try {
+    console.log(`  [API] nph-aws2_min: tm=${tm} (전국 AWS 15분 강수 fetch)`);
+    const res = await axios.get(`${APIHUB_BASE_URL}/nph-aws2_min`, {
+      params: { tm2: tm, stn: 0, disp: 1, help: 1, authKey: apihubKey },
+      timeout: 30000,
+      responseType: 'text',
+    });
+
+    const grid = parseAWSGridText(res.data);
+    awsGridCache = { tm, grid };
+    console.log(`  [API] AWS grid loaded: ${grid.size} stations`);
+    return grid;
+  } catch (err) {
+    console.error('  [API] AWS fetch error:', err.message);
+    return null;
+  }
+}
+
+// AWS 15분 실측 강수량 조회 (stn_id로 캐시 조회)
+export async function getAWSRealtime15min(stnId) {
   if (isMockMode()) {
     return generateMockRealtime();
   }
 
-  try {
-    const { nx, ny } = convertToGrid(lat, lon);
-    const { baseDate, baseTime } = getUltraSrtNcstBaseTime();
+  const grid = await fetchAWSGrid();
+  if (!grid) return 0;
 
-    console.log(`  [API] getUltraSrtNcst: base=${baseDate} ${baseTime}, nx=${nx}, ny=${ny}`);
-
-    const data = await callKmaApi('getUltraSrtNcst', {
-      numOfRows: 10,
-      pageNo: 1,
-      dataType: 'JSON',
-      base_date: baseDate,
-      base_time: baseTime,
-      nx,
-      ny,
-    });
-
-    const body = data?.response?.body;
-    if (!body || !body.items) {
-      console.error(`  [API] No data returned for ncst (${nx},${ny})`);
-      console.error(`  [API] Response:`, JSON.stringify(data?.response?.header));
-      return 0;
-    }
-
-    const rawItems = body.items.item || [];
-    const items = Array.isArray(rawItems) ? rawItems : [rawItems];
-
-    // PTY: 강수형태 (0=없음, 1=비, 2=비/눈, 3=눈, 5=빗방울, 6=빗방울눈날림, 7=눈날림)
-    // 관측 시점에 PTY=0이면 현재 강수 없음 → RN1에 이전 시간 잔류값이 있어도 0 반환
-    // 이 처리가 없으면 비가 그친 후에도 RN1 누적값으로 인해 허위 알람이 발생함
-    // PTY 항목 자체가 없거나, obsrValue가 문자열 '0' 또는 숫자 0인 경우 모두 강수 없음으로 처리
-    const ptyItem = items.find(i => i.category === 'PTY');
-    const ptyValue = ptyItem ? parseInt(ptyItem.obsrValue ?? '0', 10) : 0;
-    if (!ptyItem || ptyValue === 0) {
-      console.log(`  [API] PTY=${ptyItem?.obsrValue ?? 'N/A'} → 강수없음, RN1 무시 (${nx},${ny})`);
-      return 0;
-    }
-
-    // RN1: 1시간 강수량 (mm)
-    const rn1Item = items.find(i => i.category === 'RN1');
-    if (!rn1Item) {
-      console.log(`  [API] No RN1 category in response`);
-      return 0;
-    }
-
-    // "강수없음", 결측값(-999 등), 또는 숫자값
-    const val = rn1Item.obsrValue;
-    if (val === '강수없음' || val === null || val === undefined) return 0;
-    const rainfall = parseFloat(val) || 0;
-    if (rainfall < 0) return 0; // 결측값 (-999, -998.9 등) 필터
-
-    console.log(`  [API] PTY=${ptyItem.obsrValue}, RN1=${rainfall}mm for (${nx},${ny})`);
-    return +rainfall.toFixed(1);
-  } catch (err) {
-    console.error(`  [API] Ultra short ncst error:`, err.message);
+  const val = grid.get(String(stnId));
+  if (val === undefined) {
+    console.warn(`  [API] AWS stn=${stnId} not found in grid`);
     return 0;
   }
-}
 
-// 초단기예보 조회 - 45분 후까지의 예측 강수량 (RN1)
-export async function getForecast45min(nx, ny) {
-  if (isMockMode()) {
-    return generateMockForecast();
-  }
-
-  try {
-    const { baseDate, baseTime } = getUltraSrtBaseTime();
-
-    console.log(`  [API] getUltraSrtFcst: base=${baseDate} ${baseTime}, nx=${nx}, ny=${ny}`);
-
-    const data = await callKmaApi('getUltraSrtFcst', {
-      numOfRows: 60,
-      pageNo: 1,
-      dataType: 'JSON',
-      base_date: baseDate,
-      base_time: baseTime,
-      nx,
-      ny,
-    });
-
-    const body = data?.response?.body;
-    if (!body || !body.items) {
-      console.error(`  [API] No data returned for fcst (${nx},${ny})`);
-      console.error(`  [API] Response:`, JSON.stringify(data?.response?.header));
-      return 0;
-    }
-
-    const rawItems = body.items.item || [];
-    const items = Array.isArray(rawItems) ? rawItems : [rawItems];
-
-    // RN1·PTY 카테고리 분리
-    const rnItems = items.filter(i => i.category === 'RN1');
-    const ptyItems = items.filter(i => i.category === 'PTY');
-
-    if (rnItems.length === 0) {
-      console.log(`  [API] No RN1 forecast items`);
-      return 0;
-    }
-
-    // 가장 가까운 예보시간의 PTY 확인
-    // PTY=0이면 해당 시간대에 강수 없음 → RN1 잔류값이 있어도 0 반환
-    // PTY 항목을 찾지 못한 경우에도 강수 없음으로 간주(보수적 판단)
-    // (관측 PTY와 동일한 원칙: 강수 여부 불확실하면 누적값 무시)
-    const firstRn1 = rnItems[0];
-    const matchingPty = ptyItems.find(
-      p => p.fcstDate === firstRn1.fcstDate && p.fcstTime === firstRn1.fcstTime
-    );
-    const forecastPtyValue = matchingPty ? parseInt(matchingPty.fcstValue ?? '0', 10) : 0;
-    if (!matchingPty || forecastPtyValue === 0) {
-      console.log(`  [API] Forecast PTY=${matchingPty?.fcstValue ?? 'N/A'} at ${firstRn1.fcstTime} → 강수없음 예보, RN1 무시 (${nx},${ny})`);
-      return 0;
-    }
-
-    // 초단기예보는 1시간 단위 6시간까지 제공
-    // 45분 예측: 가장 가까운 1개 시간대의 RN1값 사용
-    let total = 0;
-    if (firstRn1) {
-      const val = firstRn1.fcstValue;
-      if (val !== '강수없음' && val !== null) {
-        total = parseFloat(val) || 0;
-      }
-    }
-
-    console.log(`  [API] Forecast PTY=${matchingPty?.fcstValue ?? 'N/A'}, RN1=${total}mm for (${nx},${ny})`);
-    return +total.toFixed(1);
-  } catch (err) {
-    console.error(`  [API] Ultra short fcst error:`, err.message);
-    return 0;
-  }
+  console.log(`  [API] AWS stn=${stnId} RN_15M=${val}mm`);
+  return val;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -406,7 +371,7 @@ function parseVsrtGridText(text) {
  * 초단기 강수예측 (레이더 기반, 10분 갱신) - 향후 60분 시간당 강수량 조회
  * - apihub.kma.go.kr nph-dfs_vsrt_grd 사용
  * - 전국 격자를 1회 fetch 후 캐시하여 API 호출 최소화
- * - KMA_APIHUB_KEY 미설정 시 기존 getUltraSrtFcst(30분 갱신)로 폴백
+ * - KMA_APIHUB_KEY 필수 (미설정 시 0 반환)
  */
 export async function getVsrtForecastHourly(nx, ny) {
   if (isMockMode()) {
@@ -414,8 +379,9 @@ export async function getVsrtForecastHourly(nx, ny) {
   }
 
   const apihubKey = getApihubKey();
-  if (!apihubKey || apihubKey.startsWith('여기에')) {
-    return getForecast45min(nx, ny);
+  if (!apihubKey) {
+    console.warn(`  [API] KMA_APIHUB_KEY 미설정 - VSRT 예보 생략`);
+    return 0;
   }
 
   const tmfc = getVsrtBaseTime();
@@ -458,15 +424,15 @@ export async function getVsrtForecastHourly(nx, ny) {
     return +val.rn1.toFixed(1);
 
   } catch (err) {
-    console.error(`  [API] VSRT error:`, err.message, '→ fallback to getUltraSrtFcst');
-    return getForecast45min(nx, ny);
+    console.error(`  [API] VSRT error:`, err.message);
+    return 0;
   }
 }
 
 export default {
   convertToGrid,
   getAWSRealtime15min,
-  getForecast45min,
   getVsrtForecastHourly,
   clearVsrtGridCache,
+  clearAWSGridCache,
 };
