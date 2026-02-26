@@ -1,6 +1,7 @@
 {
   "name": "rainfall-alarm-system",
   "version": "1.0.0",
+  "type": "module",
   "description": "실시간 강우량 알람 시스템",
   "scripts": {
     "dev": "concurrently \"npm run server\" \"npm run client\"",
