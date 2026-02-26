@@ -174,9 +174,10 @@ function generateMockForecast() {
   return +(Math.random() * 40).toFixed(1);
 }
 
-// 초단기실황 조회 - 현재 1시간 강수량 (RN1)
-// 이걸 15분 기준으로 환산: RN1 / 4 * 1 (15분 비율)
-// 또는 단순히 RN1 값 자체를 15분 대리값으로 사용
+// 초단기실황 조회 - 현재 1시간 슬라이딩 누적 강수량 (RN1) 반환
+// ※ 이 값 자체가 15분 강수량이 아님.
+//   진짜 15분 강수량은 alarmService.checkAlarmCondition 에서
+//   이전 폴링의 RN1 과 차분(delta)하여 계산한다.
 export async function getAWSRealtime15min(stnId, lat, lon) {
   if (isMockMode()) {
     return generateMockRealtime();
@@ -310,6 +311,155 @@ export async function getForecast45min(nx, ny) {
     console.error(`  [API] Ultra short fcst error:`, err.message);
     return 0;
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+// AWS 전국 10분 관측 캐시 - apihub.kma.go.kr/nph-aws1_10m
+// 날씨누리 "강수15(과거 15분간 강수량)"의 실제 데이터 소스
+// 한 폴링 사이클에서 전국 1회 fetch → 관측소별 RN_15M 캐시
+// ─────────────────────────────────────────────────────────────
+
+let awsDataCache = null; // { tm, stations: Map<stnId, {rn15, lat, lon}>, hasCoords }
+
+export function clearAwsCache() {
+  awsDataCache = null;
+}
+
+// AWS 10분 자료 최신 관측시각 (매 10분 생산, 약 5분 지연)
+function getAws10mBaseTime() {
+  const kst = getKSTNow();
+  let h = kst.getUTCHours();
+  let m = kst.getUTCMinutes() - 5;
+  if (m < 0) { m += 60; h = (h - 1 + 24) % 24; }
+  m = Math.floor(m / 10) * 10;
+  return formatDate(kst) + String(h).padStart(2, '0') + String(m).padStart(2, '0');
+}
+
+// AWS 텍스트 파싱 (help=1 포함)
+// 날씨누리 "강수15" = RN_15M 컬럼 (15분 강수량, mm)
+// 컬럼명이 버전에 따라 다를 수 있으므로 패턴 매칭으로 자동 감지
+function parseAwsText(text) {
+  const lines = text.split('\n');
+  let colStn = -1, colRn15 = -1, colLat = -1, colLon = -1;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('#')) continue;
+
+    const tokens = trimmed.replace(/^#+\s*/, '').trim().toUpperCase().split(/\s+/);
+
+    // STN 컬럼이 있는 헤더 행 탐지
+    const stnIdx = tokens.indexOf('STN');
+    if (stnIdx < 0) continue;
+
+    tokens.forEach((t, i) => {
+      if (t === 'STN' || t === 'ID') colStn = i;
+      // 15분 강수량: RN_15M, RN15M, RN15, R15M, 15M 등 패턴
+      else if (/^RN_?15/.test(t) || /^R_?15M?$/.test(t) || t === '15M') colRn15 = i;
+      else if (t === 'LAT') colLat = i;
+      else if (t === 'LON' || t === 'LNG') colLon = i;
+    });
+
+    if (colStn >= 0) break;
+  }
+
+  if (colStn < 0) return null;
+
+  const stations = new Map();
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const parts = trimmed.split(/\s+/);
+    const rawStn = parts[colStn];
+    if (!rawStn || !/^\d+$/.test(rawStn)) continue;
+
+    const rn15Raw = colRn15 >= 0 ? parseFloat(parts[colRn15]) : NaN;
+    const lat = colLat >= 0 ? parseFloat(parts[colLat]) : NaN;
+    const lon = colLon >= 0 ? parseFloat(parts[colLon]) : NaN;
+
+    stations.set(rawStn, {
+      rn15: (!isNaN(rn15Raw) && rn15Raw >= 0) ? +rn15Raw.toFixed(1) : null,
+      lat: isNaN(lat) ? null : lat,
+      lon: isNaN(lon) ? null : lon,
+    });
+  }
+
+  return stations;
+}
+
+/**
+ * AWS 전국 10분 관측 자료를 1회 fetch하여 캐시
+ * VSRT와 동일한 전국 캐시 패턴 (폴링 사이클당 1회 API 호출)
+ * KMA_APIHUB_KEY 미설정 시 건너뜀
+ */
+export async function fetchAllAwsData() {
+  if (isMockMode()) return;
+
+  const apihubKey = getApihubKey();
+  if (!apihubKey || apihubKey.startsWith('여기에')) return;
+
+  const tm = getAws10mBaseTime();
+  if (awsDataCache && awsDataCache.tm === tm) return; // 이미 최신
+
+  try {
+    console.log(`  [AWS] nph-aws1_10m: tm=${tm} (전국 fetch)`);
+
+    const res = await axios.get(`${APIHUB_BASE_URL}/nph-aws1_10m`, {
+      params: { tm, stn: 0, help: 1, authKey: apihubKey },
+      timeout: 30000,
+      responseType: 'text',
+    });
+
+    const stations = parseAwsText(res.data);
+    if (!stations || stations.size === 0) {
+      console.warn('  [AWS] 파싱 실패 또는 빈 응답 (컬럼명 확인 필요)');
+      return;
+    }
+
+    const rn15Count = [...stations.values()].filter(s => s.rn15 !== null).length;
+    const hasCoords = [...stations.values()].some(s => s.lat !== null);
+    awsDataCache = { tm, stations, hasCoords };
+    console.log(`  [AWS] 로드 완료: ${stations.size}개 관측소, RN15 유효 ${rn15Count}개, 좌표 ${hasCoords ? '있음' : '없음'}`);
+
+  } catch (err) {
+    console.error('  [AWS] fetch 오류:', err.message);
+  }
+}
+
+/**
+ * AWS 캐시에서 해당 관측소의 15분 강수량 반환
+ * - 실제 AWS 지점번호(숫자)이면 직접 매핑
+ * - 가상 관측소이거나 매핑 실패 시 위경도 기준 최근접 AWS 지점 사용
+ * - 데이터 없으면 null 반환 (→ 호출부에서 fallback 처리)
+ */
+export function getAwsRn15FromCache(stnId, lat, lon) {
+  if (!awsDataCache || !awsDataCache.stations) return null;
+  const { stations, hasCoords } = awsDataCache;
+
+  // 실제 AWS 지점번호 직접 조회
+  const stnStr = String(stnId).replace(/\D/g, ''); // 숫자만 추출
+  if (stnStr) {
+    const entry = stations.get(stnStr);
+    if (entry && entry.rn15 !== null) return entry.rn15;
+  }
+
+  // 위경도 기반 최근접 관측소 검색 (좌표 정보가 있는 경우)
+  if (hasCoords && !isNaN(lat) && !isNaN(lon)) {
+    let minDist = Infinity;
+    let nearest = null;
+
+    for (const entry of stations.values()) {
+      if (entry.lat === null || entry.lon === null || entry.rn15 === null) continue;
+      const d = (entry.lat - lat) ** 2 + (entry.lon - lon) ** 2;
+      if (d < minDist) { minDist = d; nearest = entry; }
+    }
+
+    // 약 50km(위경도 ~0.45도) 이내만 유효
+    if (nearest && minDist < 0.2) return nearest.rn15;
+  }
+
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -469,4 +619,7 @@ export default {
   getForecast45min,
   getVsrtForecastHourly,
   clearVsrtGridCache,
+  fetchAllAwsData,
+  clearAwsCache,
+  getAwsRn15FromCache,
 };

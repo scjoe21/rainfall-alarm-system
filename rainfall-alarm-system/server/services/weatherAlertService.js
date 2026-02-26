@@ -223,39 +223,69 @@ export async function updateAlertState() {
   return { changed: prevLevel !== alertState.level, state: alertState, error: false };
 }
 
-// ACTIVE 시 해당 metro의 관측소만 쿼리
-// 특보 API 인증 실패(consecutiveErrors > 0) 시: 전체 관측소 폴백 폴링
-export async function getStationsToPoll() {
-  const db = await getDatabase();
+// ─── 2단계 폴링용 관측소 쿼리 함수 ────────────────────────────────────────
 
-  // 특보 API 지속 실패 → 전체 관측소 대상으로 직접 폴링 (폴백)
-  // PTY 체크가 있으므로 실제 강수 없으면 알람이 발생하지 않아 안전
-  if (alertState.consecutiveErrors > 0) {
-    const stations = db.prepare(`
-      SELECT ws.*, e.code as emd_code, e.name as emd_name, e.district_id, d.metro_id
-      FROM weather_stations ws
-      JOIN emds e ON ws.emd_id = e.id
-      JOIN districts d ON e.district_id = d.id
-    `).all();
-    console.log(`  [Alert] Fallback mode: polling all ${stations.length} stations (alert API unavailable)`);
-    return stations;
-  }
+const ALL_STATIONS_SQL = `
+  SELECT ws.*, e.code as emd_code, e.name as emd_name, e.district_id, d.metro_id
+  FROM weather_stations ws
+  JOIN emds e ON ws.emd_id = e.id
+  JOIN districts d ON e.district_id = d.id
+`;
+
+/**
+ * [Fast poll - 5분] 호우주의보/경보 발효 광역자치단체의 관측소
+ * ACTIVE 상태일 때만 반환. IDLE이면 빈 배열.
+ */
+export async function getStationsForFastPoll() {
+  const db = await getDatabase();
 
   if (alertState.level === 'IDLE' || alertState.affectedMetroIds.length === 0) {
     return [];
   }
 
   const placeholders = alertState.affectedMetroIds.map(() => '?').join(',');
-  const stations = db.prepare(`
-    SELECT ws.*, e.code as emd_code, e.name as emd_name, e.district_id, d.metro_id
-    FROM weather_stations ws
-    JOIN emds e ON ws.emd_id = e.id
-    JOIN districts d ON e.district_id = d.id
-    WHERE d.metro_id IN (${placeholders})
-  `).all(...alertState.affectedMetroIds);
+  const stations = db.prepare(
+    `${ALL_STATIONS_SQL} WHERE d.metro_id IN (${placeholders})`
+  ).all(...alertState.affectedMetroIds);
 
-  console.log(`  [Alert] Polling ${stations.length} stations in ${alertState.affectedMetroIds.length} affected metro(s)`);
+  console.log(`  [Fast] ${stations.length}개 관측소 (특보 발효 ${alertState.affectedMetroIds.length}개 광역)`);
   return stations;
+}
+
+/**
+ * [Slow poll - 30분] 호우주의보/경보 미발효 광역자치단체의 관측소
+ * - IDLE: 전체 관측소 (전국 배경 모니터링)
+ * - ACTIVE: 특보 미발효 광역자치단체만 (발효 지역은 fast poll이 담당)
+ * - 특보 API 오류 시: 전체 관측소 (폴백)
+ */
+export async function getStationsForSlowPoll() {
+  const db = await getDatabase();
+
+  if (alertState.consecutiveErrors > 0) {
+    const stations = db.prepare(ALL_STATIONS_SQL).all();
+    console.log(`  [Slow] ${stations.length}개 관측소 (특보 API 오류 - 전체 폴백)`);
+    return stations;
+  }
+
+  if (alertState.level === 'IDLE' || alertState.affectedMetroIds.length === 0) {
+    const stations = db.prepare(ALL_STATIONS_SQL).all();
+    console.log(`  [Slow] ${stations.length}개 관측소 (IDLE - 전국 배경 모니터링)`);
+    return stations;
+  }
+
+  // ACTIVE: 특보 미발효 광역만 slow poll
+  const placeholders = alertState.affectedMetroIds.map(() => '?').join(',');
+  const stations = db.prepare(
+    `${ALL_STATIONS_SQL} WHERE d.metro_id NOT IN (${placeholders})`
+  ).all(...alertState.affectedMetroIds);
+
+  console.log(`  [Slow] ${stations.length}개 관측소 (특보 미발효 광역, ACTIVE)`);
+  return stations;
+}
+
+// 하위 호환성 유지 (기존 호출부 대응)
+export async function getStationsToPoll() {
+  return getStationsForFastPoll();
 }
 
 // 현재 상태 반환

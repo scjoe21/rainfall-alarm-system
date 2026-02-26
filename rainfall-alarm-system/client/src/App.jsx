@@ -39,14 +39,20 @@ function App() {
     <div className="min-h-screen bg-gray-100">
       {/* Header */}
       <header className="bg-blue-700 text-white shadow-lg">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
-          <h1 className="text-xl font-bold">
-            실시간 강우량 알람 시스템
+        <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between gap-3">
+          <h1 className="text-xl font-bold whitespace-nowrap">
+            주민대피 알람
           </h1>
-          {selectedMetro && (
+          {!selectedMetro ? (
+            /* 초기 화면: 측정 주기 안내 배지 */
+            <span className="text-right text-xs text-blue-200 leading-snug">
+              호우특보지역 <span className="text-white font-semibold">5분</span> 단위 측정<br />
+              <span className="text-blue-300">(특보 없는 지역은 <span className="text-blue-100 font-medium">30분</span> 단위)</span>
+            </span>
+          ) : (
             <button
               onClick={handleBack}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm transition-colors"
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm transition-colors whitespace-nowrap"
             >
               뒤로가기
             </button>
@@ -54,7 +60,7 @@ function App() {
         </div>
         {/* Breadcrumb */}
         {selectedMetro && (
-          <div className="max-w-7xl mx-auto px-4 pb-3 text-blue-200 text-sm">
+          <div className="max-w-7xl mx-auto px-4 pb-3 text-blue-200 text-sm break-keep">
             <span
               className="cursor-pointer hover:text-white"
               onClick={() => { setSelectedMetro(null); setSelectedDistrict(null); setDirectMapMode(false); }}

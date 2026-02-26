@@ -39,13 +39,12 @@ export function emitAlarm(alarm) {
   if (!io) return;
   // Emit to all clients
   io.emit('alarm', alarm);
-  // Emit to specific district room
+  // Emit to specific district room with correct field names matching client expectations
   if (alarm.districtId) {
     io.to(`district_${alarm.districtId}`).emit('rainfall_update', {
       emdCode: alarm.emdCode,
       realtime_15min: alarm.realtime15min,
-      forecast_45min: alarm.forecast45min,
-      total_60min: alarm.total60min,
+      forecast_hourly: alarm.forecastHourly,
     });
   }
 }

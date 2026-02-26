@@ -1,27 +1,31 @@
 import { getDatabase } from './config/database.js';
-import { checkAlarmCondition, clearForecastCache } from './services/alarmService.js';
-import { emitAlarm, emitAlarmCounts, emitAlertState } from './websocket.js';
-import { convertToGrid, getAWSRealtime15min, clearVsrtGridCache } from './services/kmaAPI.js';
+import { checkAlarmCondition, clearForecastCache, updateGridRN1 } from './services/alarmService.js';
+import { emitAlarm, emitAlertState } from './websocket.js';
+import { convertToGrid, getAWSRealtime15min, clearVsrtGridCache, clearAwsCache, fetchAllAwsData } from './services/kmaAPI.js';
 import {
   updateAlertState,
-  getStationsToPoll,
+  getStationsForFastPoll,
+  getStationsForSlowPoll,
   getCurrentAlertState,
 } from './services/weatherAlertService.js';
 
 const BATCH_SIZE = 5;
 
-// 간격 설정 (밀리초)
-const ALERT_CHECK_IDLE = 30 * 60 * 1000;   // 30분
-const ALERT_CHECK_ACTIVE = 5 * 60 * 1000;  // 5분
-const RAINFALL_POLL_INTERVAL = 5 * 60 * 1000; // 5분
+// ─── 폴링 간격 ────────────────────────────────────────────────────────────
+const ALERT_CHECK_IDLE   = 30 * 60 * 1000; // 30분
+const ALERT_CHECK_ACTIVE =  5 * 60 * 1000; // 5분
+const FAST_POLL_INTERVAL =  5 * 60 * 1000; // 5분 (호우주의보/경보 발효 지역)
+const SLOW_POLL_INTERVAL = 30 * 60 * 1000; // 30분 (미발효 지역 / 전국 배경)
 
 let alertCheckTimer = null;
-let rainfallPollTimer = null;
+let fastPollTimer   = null; // 5분 - 특보 발효 광역 전용
+let slowPollTimer   = null; // 30분 - 미발효 광역 + IDLE 전체
+let isPollRunning   = false; // 동시 실행 방지
 
 export function startScheduler() {
-  console.log('Scheduler started - adaptive polling mode');
-  // 5초 후 첫 특보 체크
-  scheduleAlertCheck(5000);
+  console.log('Scheduler started - 2-tier polling (fast: 5min alert areas / slow: 30min background)');
+  scheduleAlertCheck(5000);      // 5초 후 첫 특보 체크
+  scheduleSlowPoll(15 * 1000);   // 15초 후 첫 slow poll (서버 준비 대기)
 }
 
 function scheduleAlertCheck(delayMs) {
@@ -29,23 +33,23 @@ function scheduleAlertCheck(delayMs) {
   alertCheckTimer = setTimeout(() => runAlertCheck(), delayMs);
 }
 
-function scheduleRainfallPoll(delayMs) {
-  if (rainfallPollTimer) clearTimeout(rainfallPollTimer);
-  rainfallPollTimer = setTimeout(() => runRainfallCheck(), delayMs);
+function scheduleFastPoll(delayMs) {
+  if (fastPollTimer) clearTimeout(fastPollTimer);
+  fastPollTimer = setTimeout(() => runFastPoll(), delayMs);
 }
 
-function stopRainfallPoll() {
-  if (rainfallPollTimer) {
-    clearTimeout(rainfallPollTimer);
-    rainfallPollTimer = null;
-  }
+function scheduleSlowPoll(delayMs) {
+  if (slowPollTimer) clearTimeout(slowPollTimer);
+  slowPollTimer = setTimeout(() => runSlowPoll(), delayMs);
+}
+
+function stopFastPoll() {
+  if (fastPollTimer) { clearTimeout(fastPollTimer); fastPollTimer = null; }
 }
 
 // 에러 시 backoff 계산 (최대 30분)
 function getErrorBackoff(consecutiveErrors) {
-  const base = ALERT_CHECK_ACTIVE; // 5분
-  const backoff = Math.min(base * Math.pow(2, consecutiveErrors - 1), ALERT_CHECK_IDLE);
-  return backoff;
+  return Math.min(ALERT_CHECK_ACTIVE * Math.pow(2, consecutiveErrors - 1), ALERT_CHECK_IDLE);
 }
 
 async function runAlertCheck() {
@@ -54,38 +58,26 @@ async function runAlertCheck() {
   try {
     const { changed, state, error } = await updateAlertState();
 
-    // API 에러 시 backoff 적용
     if (error) {
       const backoff = getErrorBackoff(state.consecutiveErrors);
-      const backoffMin = (backoff / 60000).toFixed(1);
-      console.warn(`  [Scheduler] Alert API error - retry in ${backoffMin}min (attempt ${state.consecutiveErrors})`);
+      console.warn(`  [Scheduler] Alert API error - retry in ${(backoff / 60000).toFixed(1)}min (attempt ${state.consecutiveErrors})`);
       scheduleAlertCheck(backoff);
-      // 특보 API 실패 시에도 강우 폴링 시작 (getStationsToPoll이 전체 관측소 반환)
-      if (!rainfallPollTimer) {
-        console.log('  [Scheduler] Starting fallback full-poll mode');
-        runRainfallCheck();
-      }
+      // 특보 API 실패 → slow poll이 전체 폴백 담당 (getStationsForSlowPoll이 전체 반환)
       return;
     }
 
-    // 상태 변경 시 WebSocket 알림
-    if (changed) {
-      emitAlertState(state);
-    }
+    if (changed) emitAlertState(state);
 
     if (state.level === 'ACTIVE') {
       if (changed) {
-        // IDLE → ACTIVE 전환: 즉시 강우 폴링 시작
-        console.log('  [Scheduler] ACTIVE - starting rainfall polling (1min interval)');
-        runRainfallCheck();
+        console.log('  [Scheduler] IDLE→ACTIVE: starting fast poll (5min alert areas)');
+        runFastPoll(); // 즉시 첫 fast poll
       }
-      // ACTIVE: 5분 후 재체크
       scheduleAlertCheck(ALERT_CHECK_ACTIVE);
     } else {
-      // IDLE: 강우 폴링 중지, 30분 후 재체크
       if (changed) {
-        console.log('  [Scheduler] IDLE - stopping rainfall polling');
-        stopRainfallPoll();
+        console.log('  [Scheduler] ACTIVE→IDLE: stopping fast poll');
+        stopFastPoll();
       }
       console.log('  [Scheduler] No rain alerts. IDLE - next check in 30min');
       scheduleAlertCheck(ALERT_CHECK_IDLE);
@@ -96,127 +88,164 @@ async function runAlertCheck() {
   }
 }
 
-// 배열을 n개씩 나누기
+// ─── 배열을 n개씩 나누기 ─────────────────────────────────────────────────
 function chunk(arr, n) {
   const chunks = [];
-  for (let i = 0; i < arr.length; i += n) {
-    chunks.push(arr.slice(i, i + n));
-  }
+  for (let i = 0; i < arr.length; i += n) chunks.push(arr.slice(i, i + n));
   return chunks;
 }
 
-export async function runRainfallCheck() {
-  const currentState = getCurrentAlertState();
-  const isFallback = currentState.consecutiveErrors > 0;
-  if (currentState.level !== 'ACTIVE' && !isFallback) {
-    console.log('  [Rainfall] Skipped - not in ACTIVE state');
+// ─── 공통 폴링 로직 ───────────────────────────────────────────────────────
+async function processStations(stations, label) {
+  const startTime = Date.now();
+  console.log(`[${new Date().toISOString()}] [${label}] Processing ${stations.length} stations...`);
+
+  clearForecastCache();
+  clearVsrtGridCache();
+  clearAwsCache();
+  await fetchAllAwsData(); // AWS 전국 10분 자료 1회 fetch
+
+  // 격자좌표별 그룹핑
+  const gridGroups = {};
+  for (const station of stations) {
+    const { nx, ny } = convertToGrid(station.lat, station.lon);
+    const key = `${nx},${ny}`;
+    if (!gridGroups[key]) {
+      gridGroups[key] = { nx, ny, lat: station.lat, lon: station.lon, stations: [] };
+    }
+    gridGroups[key].stations.push(station);
+  }
+
+  const gridEntries = Object.entries(gridGroups);
+  console.log(`  [${label}] Grids: ${gridEntries.length} (${((1 - gridEntries.length / stations.length) * 100).toFixed(0)}% API saved)`);
+
+  const alarms = [];
+  let apiCalls = 0, forecastCalls = 0;
+
+  const batches = chunk(gridEntries, BATCH_SIZE);
+  for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+    const batch = batches[batchIdx];
+    if (batchIdx > 0) await new Promise(r => setTimeout(r, 500));
+
+    const realtimeResults = await Promise.allSettled(
+      batch.map(async ([key, group]) => {
+        const realtime15min = await getAWSRealtime15min(
+          group.stations[0].stn_id, group.lat, group.lon
+        );
+        return { key, group, realtime15min };
+      })
+    );
+
+    for (const result of realtimeResults) {
+      if (result.status === 'rejected') {
+        console.error(`  [${label}] Grid API error:`, result.reason?.message);
+        continue;
+      }
+
+      const { group, realtime15min } = result.value;
+      apiCalls++;
+
+      for (const station of group.stations) {
+        try {
+          const alarmResult = await checkAlarmCondition(station, realtime15min, group.nx, group.ny);
+          if (alarmResult.forecastCalled) forecastCalls++;
+
+          if (alarmResult.alarm) {
+            const alarm = {
+              emdCode: station.emd_code,
+              emdName: station.emd_name,
+              districtId: station.district_id,
+              metroId: station.metro_id,
+              realtime15min: alarmResult.realtime15min,
+              forecastHourly: alarmResult.forecastHourly,
+              timestamp: new Date().toISOString(),
+            };
+            alarms.push(alarm);
+            emitAlarm(alarm);
+            console.log(`  [${label}] ALARM: ${station.emd_name} - 15min: ${alarmResult.realtime15min}mm, forecast: ${alarmResult.forecastHourly}mm`);
+          }
+        } catch (err) {
+          console.error(`  [${label}] Station ${station.stn_id} error:`, err.message);
+        }
+      }
+
+      updateGridRN1(`${group.nx},${group.ny}`, realtime15min);
+    }
+  }
+
+  // 오래된 데이터 정리 (1시간 이상)
+  try {
+    const db = await getDatabase();
+    db.prepare("DELETE FROM rainfall_realtime WHERE timestamp < datetime('now', '-1 hour')").run();
+    db.prepare("DELETE FROM rainfall_forecast WHERE base_time < datetime('now', '-1 hour')").run();
+  } catch (cleanupErr) {
+    console.error(`  [${label}] Cleanup error:`, cleanupErr.message);
+  }
+
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  console.log(`  [${label}] Done in ${elapsed}s. API: ${apiCalls}+${forecastCalls}. Alarms: ${alarms.length}`);
+}
+
+// ─── Fast poll: 호우주의보/경보 발효 광역 (5분 간격) ──────────────────────
+export async function runFastPoll() {
+  if (isPollRunning) {
+    console.log('  [Fast] Skipped - poll already running');
+    scheduleFastPoll(FAST_POLL_INTERVAL);
     return;
   }
 
-  const startTime = Date.now();
-  console.log(`[${new Date().toISOString()}] Running rainfall check...`);
+  const currentState = getCurrentAlertState();
+  if (currentState.level !== 'ACTIVE' && currentState.consecutiveErrors === 0) {
+    // ACTIVE가 아닌 경우 fast poll 불필요 (slow poll이 담당)
+    return;
+  }
 
+  isPollRunning = true;
   try {
-    const stations = await getStationsToPoll();
-
-    if (stations.length === 0) {
-      console.log('  [Rainfall] No stations to poll');
-      scheduleRainfallPoll(RAINFALL_POLL_INTERVAL);
-      return;
+    const stations = await getStationsForFastPoll();
+    if (stations.length > 0) {
+      await processStations(stations, 'Fast');
+    } else {
+      console.log('  [Fast] No alert-area stations');
     }
-
-    clearForecastCache();
-    clearVsrtGridCache(); // VSRT 전국 격자 캐시 초기화 (폴링 사이클마다 최신 데이터 사용)
-
-    // 1단계: 격자좌표별 그룹핑
-    const gridGroups = {};
-    for (const station of stations) {
-      const { nx, ny } = convertToGrid(station.lat, station.lon);
-      const key = `${nx},${ny}`;
-      if (!gridGroups[key]) {
-        gridGroups[key] = { nx, ny, lat: station.lat, lon: station.lon, stations: [] };
-      }
-      gridGroups[key].stations.push(station);
-    }
-
-    const gridEntries = Object.entries(gridGroups);
-    console.log(`  Stations: ${stations.length}, Unique grids: ${gridEntries.length} (${((1 - gridEntries.length / stations.length) * 100).toFixed(0)}% API calls saved)`);
-
-    // 2단계: 배치 병렬 실황 API 호출
-    const alarms = [];
-    let apiCalls = 0;
-    let forecastCalls = 0;
-
-    const batches = chunk(gridEntries, BATCH_SIZE);
-
-    for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
-      const batch = batches[batchIdx];
-      // 첫 배치 제외, 배치 간 500ms 딜레이 (KMA API 429 방지)
-      if (batchIdx > 0) await new Promise(r => setTimeout(r, 500));
-
-      const realtimeResults = await Promise.allSettled(
-        batch.map(async ([key, group]) => {
-          const realtime15min = await getAWSRealtime15min(
-            group.stations[0].stn_id, group.lat, group.lon
-          );
-          return { key, group, realtime15min };
-        })
-      );
-
-      for (const result of realtimeResults) {
-        if (result.status === 'rejected') {
-          console.error(`  Grid API error:`, result.reason?.message);
-          continue;
-        }
-
-        const { key, group, realtime15min } = result.value;
-        apiCalls++;
-
-        for (const station of group.stations) {
-          try {
-            const alarmResult = await checkAlarmCondition(station, realtime15min, group.nx, group.ny);
-
-            if (alarmResult.forecastCalled) forecastCalls++;
-
-            if (alarmResult.alarm) {
-              const alarm = {
-                emdCode: station.emd_code,
-                emdName: station.emd_name,
-                districtId: station.district_id,
-                metroId: station.metro_id,
-                realtime15min: alarmResult.realtime15min,
-                forecastHourly: alarmResult.forecastHourly,
-                timestamp: new Date().toISOString(),
-              };
-              alarms.push(alarm);
-              emitAlarm(alarm);
-              console.log(`  ALARM: ${station.emd_name} - 15min: ${alarmResult.realtime15min}mm, hourly forecast: ${alarmResult.forecastHourly}mm`);
-            }
-          } catch (err) {
-            console.error(`  Station ${station.stn_id} error:`, err.message);
-          }
-        }
-      }
-    }
-
-    // 3단계: 오래된 데이터 정리
-    const db = await getDatabase();
-    try {
-      db.prepare("DELETE FROM rainfall_realtime WHERE timestamp < datetime('now', '-24 hours')").run();
-      db.prepare("DELETE FROM rainfall_forecast WHERE base_time < datetime('now', '-24 hours')").run();
-    } catch (cleanupErr) {
-      console.error('  Cleanup error:', cleanupErr.message);
-    }
-
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`  Done in ${elapsed}s. API: ${apiCalls} realtime + ${forecastCalls} forecast. Alarms: ${alarms.length}`);
   } catch (err) {
-    console.error('Rainfall check error:', err);
+    console.error('Fast poll error:', err);
+  } finally {
+    isPollRunning = false;
   }
 
-  // 다음 폴링 예약 (ACTIVE 상태 유지 시)
-  const latestState = getCurrentAlertState();
-  if (latestState.level === 'ACTIVE') {
-    scheduleRainfallPoll(RAINFALL_POLL_INTERVAL);
+  // ACTIVE 유지 중이면 다음 fast poll 예약
+  if (getCurrentAlertState().level === 'ACTIVE') {
+    scheduleFastPoll(FAST_POLL_INTERVAL);
   }
+}
+
+// ─── Slow poll: 미발효 지역 / IDLE 전체 (30분 간격) ──────────────────────
+async function runSlowPoll() {
+  if (isPollRunning) {
+    console.log('  [Slow] Skipped - poll already running, rescheduling');
+    scheduleSlowPoll(SLOW_POLL_INTERVAL);
+    return;
+  }
+
+  isPollRunning = true;
+  try {
+    const stations = await getStationsForSlowPoll();
+    if (stations.length > 0) {
+      await processStations(stations, 'Slow');
+    } else {
+      console.log('  [Slow] No non-alert stations (all covered by fast poll)');
+    }
+  } catch (err) {
+    console.error('Slow poll error:', err);
+  } finally {
+    isPollRunning = false;
+  }
+
+  scheduleSlowPoll(SLOW_POLL_INTERVAL);
+}
+
+// 하위 호환성: 외부에서 runRainfallCheck 로 호출하는 경우 대응
+export async function runRainfallCheck() {
+  return runFastPoll();
 }
