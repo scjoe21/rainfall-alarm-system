@@ -82,7 +82,9 @@ function DistrictSelector({ metroId, metroName, onSelect }) {
           return (
             <button
               key={district.id}
-              onClick={() => onSelect(district)}
+              onClick={() => {
+                onSelect(district);
+              }}
               className={`
                 bg-white rounded-xl shadow-md hover:shadow-lg p-4 text-center
                 transition-all hover:scale-105 border-2 relative
