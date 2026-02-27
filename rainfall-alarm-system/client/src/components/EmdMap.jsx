@@ -141,9 +141,11 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
 
     socket.on('alarm', alarm => {
       const emdCode = alarm.emdCode;
-      // 이미 이 지역에 5분 타이머가 걸려 있으면 타이머를 재설정하지 않음.
-      // 스케줄러가 5분마다 알람을 재전송해도 첫 수신 시점부터 딱 5분만 깜빡임.
-      if (alarmTimersRef.current[emdCode]) return;
+
+      // 기존 타이머가 있으면 제거 후 재설정 (조건 지속 중 끊김 방지)
+      if (alarmTimersRef.current[emdCode]) {
+        clearTimeout(alarmTimersRef.current[emdCode]);
+      }
 
       setAlarmEmds(prev => new Set([...prev, emdCode]));
 
@@ -154,7 +156,7 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
           return next;
         });
         delete alarmTimersRef.current[emdCode];
-      }, 4 * 60 * 1000 + 50 * 1000); // 4분 50초
+      }, 5 * 60 * 1000 + 30 * 1000); // 5분 30초 (폴링 5분 + 실행 여유 30초)
 
       alarmTimersRef.current[emdCode] = tid;
       timeoutIdsRef.current.push(tid);

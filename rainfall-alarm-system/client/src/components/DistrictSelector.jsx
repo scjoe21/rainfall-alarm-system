@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
 
-const ALARM_DURATION_MS = 4 * 60 * 1000 + 50 * 1000; // 4분 50초
+const ALARM_DURATION_MS = 5 * 60 * 1000 + 30 * 1000; // 5분 30초 (폴링 5분 + 실행 여유 30초)
 
 function DistrictSelector({ metroId, metroName, onSelect }) {
   const [districts, setDistricts] = useState([]);
@@ -33,7 +33,7 @@ function DistrictSelector({ metroId, metroName, onSelect }) {
       if (!districtId || !emdCode) return;
 
       const timerKey = `${districtId}_${emdCode}`;
-      if (timers[timerKey]) return;
+      if (timers[timerKey]) clearTimeout(timers[timerKey]);
 
       setActiveByDistrict(prev => {
         const next = { ...prev };

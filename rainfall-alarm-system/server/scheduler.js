@@ -8,6 +8,7 @@ import {
   getStationsForSlowPoll,
   getCurrentAlertState,
 } from './services/weatherAlertService.js';
+import { getAwsRn15FromCache } from './services/kmaAPI.js';
 
 const BATCH_SIZE = 5;
 
@@ -129,10 +130,12 @@ async function processStations(stations, label) {
 
     const realtimeResults = await Promise.allSettled(
       batch.map(async ([key, group]) => {
-        const realtime15min = await getAWSRealtime15min(
-          group.stations[0].stn_id, group.lat, group.lon
-        );
-        return { key, group, realtime15min };
+        // APIHUB AWS 캐시에 이 격자의 대표 관측소 데이터가 있으면 공공데이터포털 호출 생략
+        const cachedRn15 = getAwsRn15FromCache(group.stations[0].stn_id, group.lat, group.lon);
+        const realtime15min = cachedRn15 !== null
+          ? cachedRn15
+          : await getAWSRealtime15min(group.stations[0].stn_id, group.lat, group.lon);
+        return { key, group, realtime15min, skippedNcst: cachedRn15 !== null };
       })
     );
 
@@ -142,8 +145,8 @@ async function processStations(stations, label) {
         continue;
       }
 
-      const { group, realtime15min } = result.value;
-      apiCalls++;
+      const { group, realtime15min, skippedNcst } = result.value;
+      if (!skippedNcst) apiCalls++;
 
       for (const station of group.stations) {
         try {

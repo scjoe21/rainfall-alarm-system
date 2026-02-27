@@ -4,7 +4,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dbPath = path.join(__dirname, '..', '..', 'rainfall.db');
+const dbDir = process.env.DB_DIR || path.join(__dirname, '..', '..');
+const dbPath = path.join(dbDir, 'rainfall.db');
 
 let db = null;
 
@@ -71,6 +72,11 @@ export async function getDatabase() {
 
   const SQL = await initSqlJs();
 
+  // DB 디렉토리가 없으면 생성 (볼륨 마운트 시 첫 실행 대비)
+  if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+  }
+
   let sqlDb;
   if (fs.existsSync(dbPath)) {
     const fileBuffer = fs.readFileSync(dbPath);
@@ -111,7 +117,7 @@ export async function initDatabase() {
 
     CREATE TABLE IF NOT EXISTS weather_stations (
       id INTEGER PRIMARY KEY,
-      stn_id VARCHAR(10) UNIQUE,
+      stn_id VARCHAR(10),
       name VARCHAR(50),
       lat REAL,
       lon REAL,

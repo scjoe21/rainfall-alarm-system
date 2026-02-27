@@ -119,7 +119,8 @@ export async function fetchWeatherAlerts() {
 
   // 특보목록 호출 (주의보/경보만 - 예비특보 API는 사용하지 않음)
   try {
-    const wrnData = await callKmaApi('getWthrWrnList', commonParams, ALERT_BASE_URL);
+    // bypassLimit=true: 특보 조회는 강수량 API 한도 소진과 무관하게 항상 동작해야 함
+    const wrnData = await callKmaApi('getWthrWrnList', commonParams, ALERT_BASE_URL, true);
     const wrnItems = wrnData?.response?.body?.items?.item || [];
     const itemArray = Array.isArray(wrnItems) ? wrnItems : [wrnItems];
 

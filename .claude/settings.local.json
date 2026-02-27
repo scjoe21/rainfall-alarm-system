@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node regen-all-geojson.js:*)",
+      "Bash(node -e \"\nimport initSqlJs from ''sql.js'';\nimport fs from ''fs'';\nconst SQL = await initSqlJs\\(\\);\nconst buf = fs.readFileSync\\(''../rainfall.db''\\);\nconst db = new SQL.Database\\(buf\\);\n// 전체 district code, name, metro_code 출력\nconst r = db.exec\\(''SELECT d.code, d.name, m.code as mc, m.name as mn FROM districts d JOIN metros m ON d.metro_id = m.id ORDER BY d.code''\\);\nr[0].values.forEach\\(v => console.log\\(v[0], v[1]\\)\\);\n\")",
+      "Bash(dir:*)",
+      "WebSearch"
+    ]
+  }
+}

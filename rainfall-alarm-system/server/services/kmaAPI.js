@@ -7,7 +7,7 @@ const APIHUB_BASE_URL = 'https://apihub.kma.go.kr/api/typ01/cgi-bin/url';
 function getApiKey() { return process.env.KMA_API_KEY; }
 function getApihubKey() { return process.env.KMA_APIHUB_KEY; }
 function isMockMode() { return process.env.MOCK_MODE === 'true'; }
-function getDailyLimit() { return parseInt(process.env.KMA_DAILY_LIMIT) || 10000; }
+function getDailyLimit() { return parseInt(process.env.KMA_DAILY_LIMIT) || 50000; }
 
 // 일일 API 호출량 추적
 let apiCallCount = 0;
@@ -36,7 +36,8 @@ export function getApiUsage() {
 }
 
 // 공공데이터포털 API 호출 헬퍼
-export async function callKmaApi(operation, params, baseUrl = BASE_URL) {
+// bypassLimit=true: 일일 한도 체크 없이 호출 (특보 조회 등 안전 임계 API 전용)
+export async function callKmaApi(operation, params, baseUrl = BASE_URL, bypassLimit = false) {
   const limit = getDailyLimit();
   const today = getKSTDateKey();
   if (apiCallDate !== today) {
@@ -44,15 +45,17 @@ export async function callKmaApi(operation, params, baseUrl = BASE_URL) {
     apiCallDate = today;
   }
 
-  if (apiCallCount >= limit) {
-    console.error(`  [API] Daily limit reached (${apiCallCount}/${limit}). Skipping ${operation}`);
-    throw new Error(`KMA API daily limit exceeded (${limit})`);
-  }
+  if (!bypassLimit) {
+    if (apiCallCount >= limit) {
+      console.error(`  [API] Daily limit reached (${apiCallCount}/${limit}). Skipping ${operation}`);
+      throw new Error(`KMA API daily limit exceeded (${limit})`);
+    }
 
-  trackApiCall();
+    trackApiCall();
 
-  if (apiCallCount % 100 === 0) {
-    console.log(`  [API] Daily usage: ${apiCallCount}/${limit} (${((apiCallCount / limit) * 100).toFixed(1)}%)`);
+    if (apiCallCount % 100 === 0) {
+      console.log(`  [API] Daily usage: ${apiCallCount}/${limit} (${((apiCallCount / limit) * 100).toFixed(1)}%)`);
+    }
   }
 
   const res = await axios.get(`${baseUrl}/${operation}`, {
