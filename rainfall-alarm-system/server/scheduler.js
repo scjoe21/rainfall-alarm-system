@@ -1,14 +1,27 @@
 import { getDatabase } from './config/database.js';
-import { checkAlarmCondition, clearForecastCache, updateGridRN1 } from './services/alarmService.js';
+import {
+  checkAlarmConditionForAwsStation,
+  clearForecastCache,
+  updateAwsGridRN1,
+  getPrevAwsGridRN1,
+  logAwsAlarm,
+} from './services/alarmService.js';
 import { emitAlarm, emitAlertState } from './websocket.js';
-import { convertToGrid, getAWSRealtime15min, clearVsrtGridCache, clearAwsCache, fetchAllAwsData, isAwsCacheAvailable } from './services/kmaAPI.js';
+import {
+  convertToGrid,
+  getAWSRealtime15min,
+  clearVsrtGridCache,
+  clearAwsCache,
+  fetchAllAwsData,
+  isAwsCacheAvailable,
+  getAwsStationsWithRainfall,
+  getAwsStationsForFallback,
+  getAwsRn15FromCache,
+} from './services/kmaAPI.js';
 import {
   updateAlertState,
-  getStationsForFastPoll,
-  getStationsForSlowPoll,
   getCurrentAlertState,
 } from './services/weatherAlertService.js';
-import { getAwsRn15FromCache } from './services/kmaAPI.js';
 
 const BATCH_SIZE = 5;
 
@@ -51,33 +64,31 @@ function scheduleAwsRefresh(delayMs) {
 
 // ─── 10분 AWS 단독 갱신: APIHUB 1회 호출, 공공 API 0회 ──────────────────
 // fetchAllAwsData()로 전국 AWS 자료를 캐시에 올린 뒤,
-// DB의 모든 관측소에 대해 캐시 조회 → rainfall_realtime 즉시 갱신.
-// 관측소별 공공 API 호출(getUltraSrtNcst)은 수행하지 않으므로
-// 일일 API 한도를 전혀 소모하지 않는다.
+// aws_rainfall 테이블에 관측소별 15분 강수량 갱신.
 async function runAwsRefresh() {
   try {
     clearAwsCache();
-    await fetchAllAwsData(); // APIHUB 1회 (callKmaApi 카운터 미포함)
+    await fetchAllAwsData();
+
+    const stations = getAwsStationsWithRainfall();
+    if (stations.length === 0) {
+      console.log('  [AWS10m] 캐시 없음 - 폴백 모드에서는 DB 갱신 스킵');
+      scheduleAwsRefresh(AWS_REFRESH_INTERVAL);
+      return;
+    }
 
     const db = await getDatabase();
-    const stations = db.prepare(
-      'SELECT id, stn_id, lat, lon FROM weather_stations'
-    ).all();
-
-    const stmt = db.prepare(
-      'INSERT INTO rainfall_realtime (station_id, rainfall_15min) VALUES (?, ?)'
-    );
-
+    const { saveAwsRainfall } = await import('./services/alarmService.js');
     let updated = 0;
-    for (const station of stations) {
-      const rn15 = getAwsRn15FromCache(station.stn_id, station.lat, station.lon);
-      if (rn15 !== null) {
-        stmt.run(station.id, rn15);
+    for (const s of stations) {
+      const rn15 = s.rn15 ?? getAwsRn15FromCache(s.stn_id, s.lat, s.lon);
+      if (rn15 !== null && rn15 !== undefined) {
+        saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, rn15, null);
         updated++;
       }
     }
 
-    console.log(`  [AWS10m] ${updated}/${stations.length}개 관측소 갱신 (공공 API 0회)`);
+    console.log(`  [AWS10m] ${updated}/${stations.length}개 AWS 관측소 갱신 (공공 API 0회)`);
   } catch (err) {
     console.error('[AWS10m] 갱신 오류:', err.message);
   }
@@ -167,121 +178,94 @@ function chunk(arr, n) {
   return chunks;
 }
 
-// ─── 공통 폴링 로직 ───────────────────────────────────────────────────────
-async function processStations(stations, label) {
+// ─── AWS 관측소 기준 폴링 (관측소 이름 기준 알람) ───────────────────────────
+async function processAwsStations(label) {
+  clearForecastCache();
+  clearVsrtGridCache();
+  clearAwsCache();
+  await fetchAllAwsData();
+
+  const stations = isAwsCacheAvailable()
+    ? getAwsStationsWithRainfall()
+    : getAwsStationsForFallback();
+
   const startTime = Date.now();
-  console.log(`[${new Date().toISOString()}] [${label}] Processing ${stations.length} stations...`);
+  console.log(`[${new Date().toISOString()}] [${label}] Processing ${stations.length} AWS stations...`);
 
   clearForecastCache();
   clearVsrtGridCache();
   clearAwsCache();
-  await fetchAllAwsData(); // AWS 전국 10분 자료 1회 fetch
+  await fetchAllAwsData();
 
-  // 격자좌표별 그룹핑
-  const gridGroups = {};
-  for (const station of stations) {
-    const { nx, ny } = convertToGrid(station.lat, station.lon);
-    const key = `${nx},${ny}`;
-    if (!gridGroups[key]) {
-      gridGroups[key] = { nx, ny, lat: station.lat, lon: station.lon, stations: [] };
-    }
-    gridGroups[key].stations.push(station);
-  }
-
-  const gridEntries = Object.entries(gridGroups);
   const awsCacheOk = isAwsCacheAvailable();
-  console.log(`  [${label}] Grids: ${gridEntries.length}, AWS캐시: ${awsCacheOk ? '사용가능' : '없음(폴백제한)'}`);
+  console.log(`  [${label}] AWS캐시: ${awsCacheOk ? '사용가능' : '없음(폴백제한)'}`);
 
   const alarms = [];
   let apiCalls = 0, forecastCalls = 0;
 
-  // ── AWS 캐시 성공 시: 캐시 조회 전용, 공공 API 0회 (병렬 배치)
-  // ── AWS 캐시 실패 시: 전체 격자에 공공 API 직렬 폴백 (1개씩, 750ms 간격 → 429 방지)
-  //    직렬 처리: ~1377격자 × 750ms ≈ 17분 (30분 폴링 주기 이내)
-  const batchSize = awsCacheOk ? BATCH_SIZE : 1;
-  const batchDelay = awsCacheOk ? 0 : 750;
+  // AWS 캐시 성공 시: rn15 사용, 공공 API 0회. 실패 시: 폴백 2초 간격 직렬
+  const batchDelay = awsCacheOk ? 0 : 2000;
   if (!awsCacheOk) {
-    const estMin = Math.round(gridEntries.length * 0.75 / 60);
-    console.log(`  [${label}] APIHUB 없음 → 공공 API 직렬 폴백 (${gridEntries.length}격자, 약 ${estMin}분 소요)`);
+    const estMin = Math.round(stations.length * 2 / 60);
+    console.log(`  [${label}] APIHUB 없음 → 공공 API 직렬 폴백 (${stations.length}관측소, 약 ${estMin}분 소요)`);
   }
 
-  const batches = chunk(gridEntries, batchSize);
-  for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
-    const batch = batches[batchIdx];
-    if (batchIdx > 0 && batchDelay > 0) await new Promise(r => setTimeout(r, batchDelay));
+  for (let i = 0; i < stations.length; i++) {
+    if (i > 0 && batchDelay > 0) await new Promise(r => setTimeout(r, batchDelay));
 
-    const realtimeResults = await Promise.allSettled(
-      batch.map(async ([key, group]) => {
-        const stnId = group.stations[0].stn_id;
-        const cachedRn15 = getAwsRn15FromCache(stnId, group.lat, group.lon);
+    const awsStation = stations[i];
+    const { nx, ny } = convertToGrid(awsStation.lat, awsStation.lon);
+    const gridKey = `${nx},${ny}`;
 
-        let realtime15min, skippedNcst;
+    let realtime15min;
+    let currentRN1ForDelta = null;
 
-        if (cachedRn15 !== null) {
-          // AWS 캐시 히트: 15분 실측값 직접 사용
-          realtime15min = cachedRn15;
-          skippedNcst = true;
-        } else if (awsCacheOk) {
-          // AWS 캐시 정상이나 반경 내 관측소 없음 → 0 처리
-          realtime15min = 0;
-          skippedNcst = true;
-        } else {
-          // APIHUB 완전 실패 → 격자 기반 공공 API 폴백 (가상 관측소 포함 전체 격자)
-          realtime15min = await getAWSRealtime15min(stnId, group.lat, group.lon);
-          skippedNcst = false;
-        }
+    if (awsCacheOk) {
+      realtime15min = awsStation.rn15 ?? getAwsRn15FromCache(awsStation.stn_id, awsStation.lat, awsStation.lon) ?? 0;
+    } else {
+      currentRN1ForDelta = await getAWSRealtime15min(awsStation.stn_id, awsStation.lat, awsStation.lon);
+      apiCalls++;
+      const prevRN1 = getPrevAwsGridRN1(gridKey);
+      realtime15min = (prevRN1 !== null && prevRN1 !== undefined && currentRN1ForDelta >= prevRN1)
+        ? +(currentRN1ForDelta - prevRN1).toFixed(1)
+        : 0;
+    }
 
-        return { key, group, realtime15min, skippedNcst };
-      })
-    );
+    try {
+      const alarmResult = await checkAlarmConditionForAwsStation(
+        awsStation,
+        realtime15min,
+        nx,
+        ny
+      );
+      if (alarmResult.forecastCalled) forecastCalls++;
 
-    for (const result of realtimeResults) {
-      if (result.status === 'rejected') {
-        console.error(`  [${label}] Grid API error:`, result.reason?.message);
-        continue;
+      if (alarmResult.alarm) {
+        const alarm = {
+          stationName: awsStation.name,
+          stn_id: awsStation.stn_id,
+          realtime15min: alarmResult.realtime15min,
+          forecastHourly: alarmResult.forecastHourly,
+          timestamp: new Date().toISOString(),
+        };
+        alarms.push(alarm);
+        await logAwsAlarm(awsStation.stn_id, awsStation.name, alarmResult.realtime15min, alarmResult.forecastHourly);
+        emitAlarm(alarm);
+        console.log(`  [${label}] ALARM: ${awsStation.name} - 15min: ${alarmResult.realtime15min}mm, forecast: ${alarmResult.forecastHourly}mm`);
       }
 
-      const { group, realtime15min, skippedNcst } = result.value;
-      if (!skippedNcst) apiCalls++;
-
-      for (const station of group.stations) {
-        try {
-          const alarmResult = await checkAlarmCondition(station, realtime15min, group.nx, group.ny);
-          if (alarmResult.forecastCalled) forecastCalls++;
-
-          if (alarmResult.alarm) {
-            const alarm = {
-              emdCode: station.emd_code,
-              emdName: station.emd_name,
-              districtId: station.district_id,
-              metroId: station.metro_id,
-              realtime15min: alarmResult.realtime15min,
-              forecastHourly: alarmResult.forecastHourly,
-              timestamp: new Date().toISOString(),
-            };
-            alarms.push(alarm);
-            emitAlarm(alarm);
-            console.log(`  [${label}] ALARM: ${station.emd_name} - 15min: ${alarmResult.realtime15min}mm, forecast: ${alarmResult.forecastHourly}mm`);
-          }
-        } catch (err) {
-          console.error(`  [${label}] Station ${station.stn_id} error:`, err.message);
-        }
+      if (!awsCacheOk && currentRN1ForDelta !== null) {
+        updateAwsGridRN1(gridKey, currentRN1ForDelta);
       }
-
-      // prevRN1ByGrid는 RN1 누적값(1시간 슬라이딩) delta 계산에 사용된다.
-      // AWS 캐시 경로(skippedNcst=true)는 이미 15분 실측값을 직접 반환하므로
-      // prevRN1ByGrid를 15분 값으로 오염시키지 않는다 (다음 사이클 delta 오계산 방지).
-      if (!skippedNcst) {
-        updateGridRN1(`${group.nx},${group.ny}`, realtime15min);
-      }
+    } catch (err) {
+      console.error(`  [${label}] Station ${awsStation.name}(${awsStation.stn_id}) error:`, err.message);
     }
   }
 
-  // 오래된 데이터 정리 (1시간 이상)
+  // 오래된 데이터 정리
   try {
     const db = await getDatabase();
-    db.prepare("DELETE FROM rainfall_realtime WHERE timestamp < datetime('now', '-1 hour')").run();
-    db.prepare("DELETE FROM rainfall_forecast WHERE base_time < datetime('now', '-1 hour')").run();
+    db.prepare("DELETE FROM aws_alarm_logs WHERE timestamp < datetime('now', '-1 hour')").run();
   } catch (cleanupErr) {
     console.error(`  [${label}] Cleanup error:`, cleanupErr.message);
   }
@@ -306,12 +290,7 @@ export async function runFastPoll() {
 
   isPollRunning = true;
   try {
-    const stations = await getStationsForFastPoll();
-    if (stations.length > 0) {
-      await processStations(stations, 'Fast');
-    } else {
-      console.log('  [Fast] No alert-area stations');
-    }
+    await processAwsStations('Fast');
   } catch (err) {
     console.error('Fast poll error:', err);
   } finally {
@@ -334,12 +313,7 @@ async function runSlowPollOnce() {
 
   isPollRunning = true;
   try {
-    const stations = await getStationsForSlowPoll();
-    if (stations.length > 0) {
-      await processStations(stations, 'Slow');
-    } else {
-      console.log('  [Slow] No non-alert stations (all covered by fast poll)');
-    }
+    await processAwsStations('Slow');
   } catch (err) {
     console.error('Slow poll error:', err);
   } finally {

@@ -1,4 +1,9 @@
 import axios from 'axios';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const BASE_URL = 'https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0';
 const APIHUB_BASE_URL = 'https://apihub.kma.go.kr/api/typ01/cgi-bin/url';
@@ -352,10 +357,53 @@ export async function getForecast45min(nx, ny) {
 // 한 폴링 사이클에서 전국 1회 fetch → 관측소별 RN_15M 캐시
 // ─────────────────────────────────────────────────────────────
 
-let awsDataCache = null; // { tm, stations: Map<stnId, {rn15, lat, lon}>, hasCoords }
+let awsDataCache = null;  // { tm, stations: Map<stnId, {rn15, lat, lon}>, hasCoords }
+let awsStnCoords = null;  // Map<stnId, {lat, lon}> — nph-aws2_stn에서 1회 로드, 서버 재시작 전까지 유지
 
 export function clearAwsCache() {
   awsDataCache = null;
+  // awsStnCoords는 클리어 안 함: 관측소 위치는 변하지 않으므로 재사용
+}
+
+/**
+ * AWS 관측소 좌표 목록을 nph-aws2_stn에서 1회 로드
+ * nph-aws2_min에는 LAT/LON이 없으므로 이 데이터로 최근접 매칭 보완
+ * awsStnCoords !== null이면 재호출 시 즉시 반환 (빈 Map도 재시도 안 함)
+ */
+async function fetchAwsStnCoords() {
+  if (awsStnCoords !== null) return;
+
+  const apihubKey = getApihubKey();
+  if (!apihubKey || apihubKey.startsWith('여기에')) return;
+
+  try {
+    console.log('  [AWS] nph-aws2_stn: 관측소 좌표 로드 중...');
+    const res = await axios.get(`${getKmaApihubBaseUrl()}/nph-aws2_stn`, {
+      params: { authKey: apihubKey, help: 0 },
+      timeout: 30000,
+      responseType: 'text',
+      headers: workerHeaders(),
+    });
+
+    const stations = parseAwsText(res.data);
+    if (!stations || stations.size === 0) {
+      console.warn('  [AWS] nph-aws2_stn: 파싱 실패 또는 빈 응답');
+      awsStnCoords = new Map();
+      return;
+    }
+
+    const coords = new Map();
+    for (const [stnId, data] of stations) {
+      if (data.lat !== null && data.lon !== null) {
+        coords.set(stnId, { lat: data.lat, lon: data.lon });
+      }
+    }
+    awsStnCoords = coords;
+    console.log(`  [AWS] nph-aws2_stn: ${coords.size}개 관측소 좌표 로드 완료`);
+  } catch (err) {
+    console.error('  [AWS] nph-aws2_stn 오류:', err.message);
+    awsStnCoords = new Map(); // 재시도 방지
+  }
 }
 
 // AWS 1분 자료 최신 관측시각 (매분 생산, 약 2분 지연) — nph-aws2_min용
@@ -372,7 +420,7 @@ function getAws1mBaseTime() {
 // 컬럼명이 버전에 따라 다를 수 있으므로 패턴 매칭으로 자동 감지
 function parseAwsText(text) {
   const lines = text.split('\n');
-  let colStn = -1, colRn15 = -1, colLat = -1, colLon = -1;
+  let colStn = -1, colRn15 = -1, colLat = -1, colLon = -1, colName = -1;
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -390,6 +438,7 @@ function parseAwsText(text) {
       else if (/^RN[-_]?15/.test(t) || /^R_?15M?$/.test(t) || t === '15M') colRn15 = i;
       else if (t === 'LAT') colLat = i;
       else if (t === 'LON' || t === 'LNG') colLon = i;
+      else if (t === 'STN_NM' || t === 'STN_NAME' || t === 'NAME' || t === 'NM') colName = i;
     });
 
     if (colStn >= 0) break;
@@ -409,11 +458,13 @@ function parseAwsText(text) {
     const rn15Raw = colRn15 >= 0 ? parseFloat(parts[colRn15]) : NaN;
     const lat = colLat >= 0 ? parseFloat(parts[colLat]) : NaN;
     const lon = colLon >= 0 ? parseFloat(parts[colLon]) : NaN;
+    const name = colName >= 0 && parts[colName] ? String(parts[colName]).trim() : null;
 
     stations.set(rawStn, {
       rn15: (!isNaN(rn15Raw) && rn15Raw >= 0) ? +rn15Raw.toFixed(1) : null,
       lat: isNaN(lat) ? null : lat,
       lon: isNaN(lon) ? null : lon,
+      name: name || `관측소${rawStn}`,
     });
   }
 
@@ -457,6 +508,9 @@ export async function fetchAllAwsData() {
       const hasCoords = [...stations.values()].some(s => s.lat !== null);
       awsDataCache = { tm, stations, hasCoords };
       console.log(`  [AWS] 로드 완료: ${stations.size}개 관측소, RN15 유효 ${rn15Count}개, 좌표 ${hasCoords ? '있음' : '없음'}`);
+
+      // nph-aws2_min에 좌표 없으면 nph-aws2_stn으로 보완 (1회만 fetch)
+      if (!hasCoords) await fetchAwsStnCoords();
       return; // 성공
 
     } catch (err) {
@@ -472,6 +526,46 @@ export async function fetchAllAwsData() {
 /** AWS 캐시 성공 여부 (processStations 폴백 결정에 사용) */
 export function isAwsCacheAvailable() {
   return awsDataCache !== null && awsDataCache.stations != null && awsDataCache.stations.size > 0;
+}
+
+/** AWS 관측소 목록 (캐시 성공 시): { stn_id, name, lat, lon, rn15 }[] */
+export function getAwsStationsWithRainfall() {
+  if (!awsDataCache || !awsDataCache.stations) return [];
+  const { stations, hasCoords } = awsDataCache;
+  const list = [];
+  for (const [stnId, entry] of stations) {
+    let lat = entry.lat, lon = entry.lon;
+    if ((lat === null || lon === null) && awsStnCoords) {
+      const c = awsStnCoords.get(stnId);
+      if (c) { lat = c.lat; lon = c.lon; }
+    }
+    if (lat === null || lon === null) continue; // 좌표 없으면 폴백 불가
+    list.push({
+      stn_id: stnId,
+      name: entry.name || `관측소${stnId}`,
+      lat, lon,
+      rn15: entry.rn15,
+    });
+  }
+  return list;
+}
+
+let awsStationsFallback = null;
+
+/** AWS 관측소 폴백 목록 (APIHUB 실패 시): data/aws-stations-fallback.json */
+export function getAwsStationsForFallback() {
+  if (awsStationsFallback) return awsStationsFallback;
+  try {
+    const p = path.join(__dirname, '..', '..', 'data', 'aws-stations-fallback.json');
+    if (fs.existsSync(p)) {
+      awsStationsFallback = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      return awsStationsFallback;
+    }
+  } catch (e) {
+    console.warn('  [AWS] aws-stations-fallback.json 로드 실패:', e.message);
+  }
+  awsStationsFallback = [];
+  return awsStationsFallback;
 }
 
 /**
@@ -491,19 +585,32 @@ export function getAwsRn15FromCache(stnId, lat, lon) {
     if (entry && entry.rn15 !== null) return entry.rn15;
   }
 
-  // 위경도 기반 최근접 관측소 검색 (좌표 정보가 있는 경우)
-  if (hasCoords && !isNaN(lat) && !isNaN(lon)) {
+  // 위경도 기반 최근접 관측소 검색
+  // hasCoords=true이면 stations 안에 LAT/LON 포함, false이면 awsStnCoords로 보완
+  const canNearest = hasCoords || (awsStnCoords && awsStnCoords.size > 0);
+  if (canNearest && !isNaN(lat) && !isNaN(lon)) {
     let minDist = Infinity;
-    let nearest = null;
+    let nearestRn15 = null;
 
-    for (const entry of stations.values()) {
-      if (entry.lat === null || entry.lon === null || entry.rn15 === null) continue;
-      const d = (entry.lat - lat) ** 2 + (entry.lon - lon) ** 2;
-      if (d < minDist) { minDist = d; nearest = entry; }
+    for (const [id, entry] of stations) {
+      if (entry.rn15 === null) continue;
+
+      let entryLat = entry.lat;
+      let entryLon = entry.lon;
+
+      // nph-aws2_min에 좌표 없으면 awsStnCoords에서 보완
+      if ((entryLat === null || entryLon === null) && awsStnCoords) {
+        const stnCoord = awsStnCoords.get(id);
+        if (stnCoord) { entryLat = stnCoord.lat; entryLon = stnCoord.lon; }
+      }
+
+      if (entryLat === null || entryLon === null) continue;
+      const d = (entryLat - lat) ** 2 + (entryLon - lon) ** 2;
+      if (d < minDist) { minDist = d; nearestRn15 = entry.rn15; }
     }
 
     // 약 50km(위경도 ~0.45도) 이내만 유효
-    if (nearest && minDist < 0.2) return nearest.rn15;
+    if (nearestRn15 !== null && minDist < 0.2) return nearestRn15;
   }
 
   return null;

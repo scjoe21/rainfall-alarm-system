@@ -4,6 +4,9 @@ import kma from './kmaAPI.js';
 const REALTIME_THRESHOLD = 20.0;
 const FORECAST_THRESHOLD = 55.0;
 
+// AWS 관측소용 격자별 이전 RN1 (prevRN1ByGrid와 별도)
+const prevRN1ByAwsGrid = {};
+
 // 격자좌표별 예보 캐시 (동일 실행 사이클 내에서만 유효)
 let forecastCache = {};
 
@@ -109,6 +112,111 @@ export async function checkAlarmCondition(station, preloadedRealtime = null, pre
   return { realtime15min, forecastHourly, alarm: false, forecastCalled };
 }
 
+// ─── AWS 관측소 기준 알람 (관측소 이름 기준) ─────────────────────────────────
+
+export function updateAwsGridRN1(gridKey, rn1) {
+  prevRN1ByAwsGrid[gridKey] = rn1;
+}
+
+export function getPrevAwsGridRN1(gridKey) {
+  return prevRN1ByAwsGrid[gridKey] ?? null;
+}
+
+/**
+ * AWS 관측소 기준 알람 조건 체크
+ * @param {Object} awsStation - { stn_id, name, lat, lon, rn15? }
+ * @param {number} preloadedRealtime - 이미 조회된 15분 강수량 (캐시 또는 폴백)
+ * @param {number} preloadedNx - 격자 nx
+ * @param {number} preloadedNy - 격자 ny
+ */
+export async function checkAlarmConditionForAwsStation(awsStation, preloadedRealtime = null, preloadedNx = null, preloadedNy = null) {
+  const db = await getDatabase();
+
+  let realtime15min;
+
+  if (preloadedRealtime !== null) {
+    realtime15min = preloadedRealtime;
+  } else {
+    const cachedRn15 = kma.getAwsRn15FromCache(awsStation.stn_id, awsStation.lat, awsStation.lon);
+    if (cachedRn15 !== null) {
+      realtime15min = cachedRn15;
+    } else {
+      const currentRN1 = await kma.getAWSRealtime15min(awsStation.stn_id, awsStation.lat, awsStation.lon);
+      const nx = preloadedNx ?? kma.convertToGrid(awsStation.lat, awsStation.lon).nx;
+      const ny = preloadedNy ?? kma.convertToGrid(awsStation.lat, awsStation.lon).ny;
+      const gridKey = `${nx},${ny}`;
+      const prevRN1 = prevRN1ByAwsGrid[gridKey] ?? null;
+      realtime15min = (prevRN1 !== null && currentRN1 >= prevRN1)
+        ? +(currentRN1 - prevRN1).toFixed(1)
+        : 0;
+    }
+  }
+
+  if (realtime15min <= REALTIME_THRESHOLD) {
+    saveAwsRainfall(db, awsStation.stn_id, awsStation.name, awsStation.lat, awsStation.lon, realtime15min, 0);
+    return { realtime15min, forecastHourly: 0, alarm: false, forecastCalled: false };
+  }
+
+  const nx = preloadedNx ?? kma.convertToGrid(awsStation.lat, awsStation.lon).nx;
+  const ny = preloadedNy ?? kma.convertToGrid(awsStation.lat, awsStation.lon).ny;
+  const gridKey = `${nx},${ny}`;
+
+  let forecastHourly;
+  let forecastCalled = false;
+
+  if (gridKey in forecastCache) {
+    forecastHourly = forecastCache[gridKey];
+  } else {
+    forecastHourly = await kma.getVsrtForecastHourly(nx, ny);
+    forecastCache[gridKey] = forecastHourly;
+    forecastCalled = true;
+  }
+
+  saveAwsRainfall(db, awsStation.stn_id, awsStation.name, awsStation.lat, awsStation.lon, realtime15min, forecastHourly);
+
+  if (forecastHourly >= FORECAST_THRESHOLD) {
+    return { realtime15min, forecastHourly, alarm: true, forecastCalled };
+  }
+
+  return { realtime15min, forecastHourly, alarm: false, forecastCalled };
+}
+
+export function saveAwsRainfall(db, stnId, name, lat, lon, rainfall15min, forecastHourly) {
+  const stmt = db.prepare(`
+    INSERT OR REPLACE INTO aws_rainfall (stn_id, name, lat, lon, rainfall_15min, forecast_hourly, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+  `);
+  stmt.run(stnId, name, lat, lon, rainfall15min, forecastHourly ?? null);
+}
+
+export async function getLatestRainfallByAwsStation() {
+  const db = await getDatabase();
+  return db.prepare(`
+    SELECT stn_id, name, lat, lon, rainfall_15min, forecast_hourly, updated_at
+    FROM aws_rainfall
+    WHERE updated_at >= datetime('now', '-60 minutes')
+    ORDER BY updated_at DESC
+  `).all();
+}
+
+export async function getAwsAlarmLogs(limit = 50) {
+  const db = await getDatabase();
+  return db.prepare(`
+    SELECT stn_id, station_name, realtime_15min, forecast_hourly, timestamp
+    FROM aws_alarm_logs
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `).all(limit);
+}
+
+export async function logAwsAlarm(stnId, stationName, realtime15min, forecastHourly) {
+  const db = await getDatabase();
+  db.prepare(`
+    INSERT INTO aws_alarm_logs (stn_id, station_name, realtime_15min, forecast_hourly)
+    VALUES (?, ?, ?, ?)
+  `).run(stnId, stationName, realtime15min, forecastHourly);
+}
+
 export async function getAlarmsByDistrict(districtId, limit = 20) {
   const db = await getDatabase();
   return db.prepare(`
@@ -174,8 +282,14 @@ export async function getLatestRainfallByDistrict(districtId) {
 
 export default {
   checkAlarmCondition,
+  checkAlarmConditionForAwsStation,
   clearForecastCache,
   updateGridRN1,
+  updateAwsGridRN1,
+  saveAwsRainfall,
+  getLatestRainfallByAwsStation,
+  getAwsAlarmLogs,
+  logAwsAlarm,
   getAlarmsByDistrict,
   getAlarmCountsByMetro,
   getLatestRainfallByDistrict,

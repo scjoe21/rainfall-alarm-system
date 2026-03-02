@@ -159,6 +159,19 @@ router.get('/rainfall/district/:districtId', async (req, res) => {
   res.json(data);
 });
 
+// AWS 관측소별 현재 강우량 (관측소 이름 기준)
+router.get('/rainfall/aws-stations', async (req, res) => {
+  const data = await alarmService.getLatestRainfallByAwsStation();
+  res.json(data);
+});
+
+// AWS 관측소 알람 이력
+router.get('/alarms/aws', async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 50, MAX_LIMIT);
+  const rows = await alarmService.getAwsAlarmLogs(limit);
+  res.json(rows);
+});
+
 // 알람 이력
 router.get('/alarms/:districtId', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 20, MAX_LIMIT);

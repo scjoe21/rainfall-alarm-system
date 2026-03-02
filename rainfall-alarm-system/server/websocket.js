@@ -39,8 +39,16 @@ export function emitAlarm(alarm) {
   if (!io) return;
   // Emit to all clients
   io.emit('alarm', alarm);
-  // Emit to specific district room with correct field names matching client expectations
-  if (alarm.districtId) {
+  // AWS 관측소 기준: stationName, stn_id (districtId 없음) → 전체 구독자에게 rainfall_update
+  // 기존 emd 기준: districtId 있으면 해당 구역 구독자에게만
+  if (alarm.stationName) {
+    io.emit('rainfall_update', {
+      stationName: alarm.stationName,
+      stn_id: alarm.stn_id,
+      realtime_15min: alarm.realtime15min,
+      forecast_hourly: alarm.forecastHourly,
+    });
+  } else if (alarm.districtId) {
     io.to(`district_${alarm.districtId}`).emit('rainfall_update', {
       emdCode: alarm.emdCode,
       realtime_15min: alarm.realtime15min,

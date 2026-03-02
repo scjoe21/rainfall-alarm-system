@@ -171,6 +171,25 @@ export async function initDatabase() {
       timestamp DATETIME DEFAULT (datetime('now')),
       FOREIGN KEY (emd_id) REFERENCES emds(id)
     );
+
+    CREATE TABLE IF NOT EXISTS aws_rainfall (
+      stn_id VARCHAR(10) PRIMARY KEY,
+      name VARCHAR(50),
+      lat REAL,
+      lon REAL,
+      rainfall_15min REAL,
+      forecast_hourly REAL,
+      updated_at DATETIME DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS aws_alarm_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      stn_id VARCHAR(10),
+      station_name VARCHAR(50),
+      realtime_15min REAL,
+      forecast_hourly REAL,
+      timestamp DATETIME DEFAULT (datetime('now'))
+    );
   `);
 
   console.log('Database initialized');
