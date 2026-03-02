@@ -420,7 +420,7 @@ function getAws1mBaseTime() {
 // 컬럼명이 버전에 따라 다를 수 있으므로 패턴 매칭으로 자동 감지
 function parseAwsText(text) {
   const lines = text.split('\n');
-  let colStn = -1, colRn15 = -1, colLat = -1, colLon = -1, colName = -1;
+  let colStn = -1, colRn15 = -1, colRn60 = -1, colLat = -1, colLon = -1, colName = -1;
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -436,6 +436,8 @@ function parseAwsText(text) {
       if (t === 'STN' || t === 'ID') colStn = i;
       // 15분 강수량: RN_15M, RN15M, RN15, R15M, 15M 등 패턴
       else if (/^RN[-_]?15/.test(t) || /^R_?15M?$/.test(t) || t === '15M') colRn15 = i;
+      // 1시간 강수량: RN_60M, RN60M, RN60, R60M, 60M 등 패턴
+      else if (/^RN[-_]?60/.test(t) || /^R_?60M?$/.test(t) || t === '60M' || t === 'RN1') colRn60 = i;
       else if (t === 'LAT') colLat = i;
       else if (t === 'LON' || t === 'LNG') colLon = i;
       else if (t === 'STN_NM' || t === 'STN_NAME' || t === 'NAME' || t === 'NM') colName = i;
@@ -456,12 +458,14 @@ function parseAwsText(text) {
     if (!rawStn || !/^\d+$/.test(rawStn)) continue;
 
     const rn15Raw = colRn15 >= 0 ? parseFloat(parts[colRn15]) : NaN;
+    const rn60Raw = colRn60 >= 0 ? parseFloat(parts[colRn60]) : NaN;
     const lat = colLat >= 0 ? parseFloat(parts[colLat]) : NaN;
     const lon = colLon >= 0 ? parseFloat(parts[colLon]) : NaN;
     const name = colName >= 0 && parts[colName] ? String(parts[colName]).trim() : null;
 
     stations.set(rawStn, {
       rn15: (!isNaN(rn15Raw) && rn15Raw >= 0) ? +rn15Raw.toFixed(1) : null,
+      rn60: (!isNaN(rn60Raw) && rn60Raw >= 0) ? +rn60Raw.toFixed(1) : null,
       lat: isNaN(lat) ? null : lat,
       lon: isNaN(lon) ? null : lon,
       name: name || `관측소${rawStn}`,
@@ -505,9 +509,10 @@ export async function fetchAllAwsData() {
       }
 
       const rn15Count = [...stations.values()].filter(s => s.rn15 !== null).length;
+      const rn60Count = [...stations.values()].filter(s => s.rn60 !== null).length;
       const hasCoords = [...stations.values()].some(s => s.lat !== null);
       awsDataCache = { tm, stations, hasCoords };
-      console.log(`  [AWS] 로드 완료: ${stations.size}개 관측소, RN15 유효 ${rn15Count}개, 좌표 ${hasCoords ? '있음' : '없음'}`);
+      console.log(`  [AWS] 로드 완료: ${stations.size}개, RN15 ${rn15Count}개, RN60 ${rn60Count}개, 좌표 ${hasCoords ? '있음' : '없음'}`);
 
       // nph-aws2_min에 좌표 없으면 nph-aws2_stn으로 보완 (1회만 fetch)
       if (!hasCoords) await fetchAwsStnCoords();
@@ -528,7 +533,7 @@ export function isAwsCacheAvailable() {
   return awsDataCache !== null && awsDataCache.stations != null && awsDataCache.stations.size > 0;
 }
 
-/** AWS 관측소 목록 (캐시 성공 시): { stn_id, name, lat, lon, rn15 }[] */
+/** AWS 관측소 목록 (캐시 성공 시): { stn_id, name, lat, lon, rn15, rn60 }[] */
 export function getAwsStationsWithRainfall() {
   if (!awsDataCache || !awsDataCache.stations) return [];
   const { stations, hasCoords } = awsDataCache;
@@ -545,6 +550,7 @@ export function getAwsStationsWithRainfall() {
       name: entry.name || `관측소${stnId}`,
       lat, lon,
       rn15: entry.rn15,
+      rn60: entry.rn60,
     });
   }
   return list;

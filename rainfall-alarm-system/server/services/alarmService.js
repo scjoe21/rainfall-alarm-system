@@ -74,9 +74,9 @@ export async function checkAlarmCondition(station, preloadedRealtime = null, pre
     'INSERT INTO rainfall_realtime (station_id, rainfall_15min) VALUES (?, ?)'
   ).run(station.id, realtime15min);
 
-  // 조건 1: 15분 강수량 > 20mm 아니면 스킵
+  // 조건 1: 15분 강수량 >= 20mm 아니면 스킵 (20밀리 이상)
   // forecast=0 저장: 비가 그쳤을 때 예측값이 DB에 잔류하여 오표시되는 것 방지
-  if (realtime15min <= REALTIME_THRESHOLD) {
+  if (realtime15min < REALTIME_THRESHOLD) {
     db.prepare(
       'INSERT INTO rainfall_forecast (station_id, base_time, forecast_time, rainfall_forecast) VALUES (?, datetime("now"), datetime("now", "+1 hour"), ?)'
     ).run(station.id, 0);
@@ -104,7 +104,7 @@ export async function checkAlarmCondition(station, preloadedRealtime = null, pre
     'INSERT INTO rainfall_forecast (station_id, base_time, forecast_time, rainfall_forecast) VALUES (?, datetime("now"), datetime("now", "+1 hour"), ?)'
   ).run(station.id, forecastHourly);
 
-  // 조건 2: 초단기예보 시간당 강수량 >= 55mm
+  // 조건 2: 60분 예측치 >= 55mm (초단기 강수예측, 향후 1시간 시간당 강수량)
   if (forecastHourly >= FORECAST_THRESHOLD) {
     return { realtime15min, forecastHourly, alarm: true, forecastCalled };
   }
@@ -124,13 +124,16 @@ export function getPrevAwsGridRN1(gridKey) {
 
 /**
  * AWS 관측소 기준 알람 조건 체크
- * @param {Object} awsStation - { stn_id, name, lat, lon, rn15? }
+ * @param {Object} awsStation - { stn_id, name, lat, lon, rn15?, rn60? }
  * @param {number} preloadedRealtime - 이미 조회된 15분 강수량 (캐시 또는 폴백)
  * @param {number} preloadedNx - 격자 nx
  * @param {number} preloadedNy - 격자 ny
+ * @param {number} preloadedRn60 - 1시간 실측치 (RN1 또는 RN_60M, 특보 없을 때 표시용)
  */
-export async function checkAlarmConditionForAwsStation(awsStation, preloadedRealtime = null, preloadedNx = null, preloadedNy = null) {
+export async function checkAlarmConditionForAwsStation(awsStation, preloadedRealtime = null, preloadedNx = null, preloadedNy = null, preloadedRn60 = null) {
   const db = await getDatabase();
+
+  const rainfall1hour = preloadedRn60 ?? awsStation.rn60 ?? null;
 
   let realtime15min;
 
@@ -152,8 +155,9 @@ export async function checkAlarmConditionForAwsStation(awsStation, preloadedReal
     }
   }
 
-  if (realtime15min <= REALTIME_THRESHOLD) {
-    saveAwsRainfall(db, awsStation.stn_id, awsStation.name, awsStation.lat, awsStation.lon, realtime15min, 0);
+  // 15분 실측치 < 20mm: 예보 조회 생략, 실측치만 저장 (1시간 실측치는 특보 없을 때 표시용)
+  if (realtime15min < REALTIME_THRESHOLD) {
+    saveAwsRainfall(db, awsStation.stn_id, awsStation.name, awsStation.lat, awsStation.lon, realtime15min, 0, rainfall1hour);
     return { realtime15min, forecastHourly: 0, alarm: false, forecastCalled: false };
   }
 
@@ -172,8 +176,9 @@ export async function checkAlarmConditionForAwsStation(awsStation, preloadedReal
     forecastCalled = true;
   }
 
-  saveAwsRainfall(db, awsStation.stn_id, awsStation.name, awsStation.lat, awsStation.lon, realtime15min, forecastHourly);
+  saveAwsRainfall(db, awsStation.stn_id, awsStation.name, awsStation.lat, awsStation.lon, realtime15min, forecastHourly, rainfall1hour);
 
+  // 알람: 15분 실측치 >= 20mm AND 60분 예측치 >= 55mm
   if (forecastHourly >= FORECAST_THRESHOLD) {
     return { realtime15min, forecastHourly, alarm: true, forecastCalled };
   }
@@ -181,18 +186,18 @@ export async function checkAlarmConditionForAwsStation(awsStation, preloadedReal
   return { realtime15min, forecastHourly, alarm: false, forecastCalled };
 }
 
-export function saveAwsRainfall(db, stnId, name, lat, lon, rainfall15min, forecastHourly) {
+export function saveAwsRainfall(db, stnId, name, lat, lon, rainfall15min, forecastHourly, rainfall1hour = null) {
   const stmt = db.prepare(`
-    INSERT OR REPLACE INTO aws_rainfall (stn_id, name, lat, lon, rainfall_15min, forecast_hourly, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+    INSERT OR REPLACE INTO aws_rainfall (stn_id, name, lat, lon, rainfall_15min, rainfall_1hour, forecast_hourly, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
   `);
-  stmt.run(stnId, name, lat, lon, rainfall15min, forecastHourly ?? null);
+  stmt.run(stnId, name, lat, lon, rainfall15min, rainfall1hour, forecastHourly ?? null);
 }
 
 export async function getLatestRainfallByAwsStation() {
   const db = await getDatabase();
   return db.prepare(`
-    SELECT stn_id, name, lat, lon, rainfall_15min, forecast_hourly, updated_at
+    SELECT stn_id, name, lat, lon, rainfall_15min, rainfall_1hour, forecast_hourly, updated_at
     FROM aws_rainfall
     WHERE updated_at >= datetime('now', '-60 minutes')
     ORDER BY updated_at DESC
@@ -255,10 +260,10 @@ export async function getAlarmCountsByMetro(metroId) {
 export async function syncAwsToRainfallRealtime() {
   const db = await getDatabase();
   const awsRows = db.prepare(`
-    SELECT stn_id, lat, lon, rainfall_15min, forecast_hourly
+    SELECT stn_id, lat, lon, rainfall_15min, rainfall_1hour, forecast_hourly
     FROM aws_rainfall
     WHERE updated_at >= datetime('now', '-60 minutes')
-      AND rainfall_15min IS NOT NULL
+      AND (rainfall_15min IS NOT NULL OR rainfall_1hour IS NOT NULL)
   `).all();
 
   if (awsRows.length === 0) return 0;
@@ -268,7 +273,7 @@ export async function syncAwsToRainfallRealtime() {
   ).all();
 
   const insertRealtime = db.prepare(
-    'INSERT INTO rainfall_realtime (station_id, rainfall_15min) VALUES (?, ?)'
+    'INSERT INTO rainfall_realtime (station_id, rainfall_15min, rainfall_1hour) VALUES (?, ?, ?)'
   );
   const insertForecast = db.prepare(`
     INSERT INTO rainfall_forecast (station_id, base_time, forecast_time, rainfall_forecast)
@@ -293,8 +298,9 @@ export async function syncAwsToRainfallRealtime() {
 
     if (nearest) {
       const rn15 = nearest.rainfall_15min ?? 0;
+      const rn60 = nearest.rainfall_1hour ?? null;
       const fcst = nearest.forecast_hourly ?? 0;
-      insertRealtime.run(ws.id, rn15);
+      insertRealtime.run(ws.id, rn15, rn60);
       insertForecast.run(ws.id, fcst);
       synced++;
     }
@@ -316,6 +322,7 @@ export async function getLatestRainfallByDistrict(districtId) {
       e.name as emd_name,
       ws.name as station_name,
       COALESCE(rr.rainfall_15min, 0) AS realtime_15min,
+      rr.rainfall_1hour AS realtime_1hour,
       COALESCE(rf.rainfall_forecast, 0) AS forecast_hourly
     FROM emds e
     LEFT JOIN weather_stations ws ON ws.emd_id = e.id

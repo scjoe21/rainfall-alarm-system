@@ -140,6 +140,7 @@ export async function initDatabase() {
       station_id INTEGER,
       timestamp DATETIME DEFAULT (datetime('now')),
       rainfall_15min REAL,
+      rainfall_1hour REAL,
       FOREIGN KEY (station_id) REFERENCES weather_stations(id)
     );
 
@@ -178,6 +179,7 @@ export async function initDatabase() {
       lat REAL,
       lon REAL,
       rainfall_15min REAL,
+      rainfall_1hour REAL,
       forecast_hourly REAL,
       updated_at DATETIME DEFAULT (datetime('now'))
     );
@@ -191,6 +193,14 @@ export async function initDatabase() {
       timestamp DATETIME DEFAULT (datetime('now'))
     );
   `);
+
+  // 기존 DB 마이그레이션: rainfall_1hour 컬럼 추가
+  try {
+    db.exec('ALTER TABLE rainfall_realtime ADD COLUMN rainfall_1hour REAL');
+  } catch (_) { /* 이미 있으면 무시 */ }
+  try {
+    db.exec('ALTER TABLE aws_rainfall ADD COLUMN rainfall_1hour REAL');
+  } catch (_) { /* 이미 있으면 무시 */ }
 
   console.log('Database initialized');
   return db;

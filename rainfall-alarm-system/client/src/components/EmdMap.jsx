@@ -110,8 +110,9 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
         const map = {};
         rainfall.forEach(item => {
           map[item.emd_code] = {
-            realtime_15min: item.realtime_15min,
-            forecast_hourly: item.forecast_hourly,
+            realtime_15min: item.realtime_15min ?? 0,
+            realtime_1hour: item.realtime_1hour ?? null,
+            forecast_hourly: item.forecast_hourly ?? 0,
             station_name: item.station_name || null,
           };
         });
@@ -132,9 +133,16 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
     }
 
     socket.on('rainfall_update', update => {
+      if (!update.emdCode) return; // 읍면동 맵은 emd_code 기준
       setRainfallData(prev => ({
         ...prev,
-        [update.emdCode]: update,
+        [update.emdCode]: {
+          ...prev[update.emdCode],
+          realtime_15min: update.realtime_15min ?? prev[update.emdCode]?.realtime_15min ?? 0,
+          realtime_1hour: update.realtime_1hour ?? prev[update.emdCode]?.realtime_1hour ?? null,
+          forecast_hourly: update.forecast_hourly ?? prev[update.emdCode]?.forecast_hourly ?? 0,
+          station_name: prev[update.emdCode]?.station_name ?? null,
+        },
       }));
       setLastUpdated(new Date());
     });
@@ -212,20 +220,34 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
     // layer 참조 저장 (깜빡임용)
     layerMapRef.current[emdCode] = layer;
 
-    // 툴팁
+    // 툴팁: 특보 있을 때 15분+예보, 특보 없을 때 1시간 실측치 별도 란
     let tooltipContent;
     if (data && data.station_name) {
+      const hasForecast = (data.forecast_hourly ?? 0) > 0;
+      const r15 = (data.realtime_15min ?? 0).toFixed(1);
+      const r60 = data.realtime_1hour != null ? data.realtime_1hour.toFixed(1) : null;
+      const fcst = (data.forecast_hourly ?? 0).toFixed(1);
       tooltipContent = `<div style="font-size:13px;line-height:1.5">
           <strong>${emdName}</strong><br/>
           관측소: ${data.station_name}<br/>
-          실시간 15분: ${data.realtime_15min.toFixed(1)}mm<br/>
-          시간당 예보: <b>${data.forecast_hourly.toFixed(1)}mm/hr</b>
+          ${hasForecast
+            ? `실시간 15분: ${r15}mm<br/>시간당 예보: <b>${fcst}mm/hr</b>`
+            : r60 != null
+              ? `<span style="color:#0ea5e9;font-weight:600">1시간 실측치: ${r60}mm</span>`
+              : `실시간 15분: ${r15}mm`}
         </div>`;
     } else if (data) {
+      const hasForecast = (data.forecast_hourly ?? 0) > 0;
+      const r15 = (data.realtime_15min ?? 0).toFixed(1);
+      const r60 = data.realtime_1hour != null ? data.realtime_1hour.toFixed(1) : null;
+      const fcst = (data.forecast_hourly ?? 0).toFixed(1);
       tooltipContent = `<div style="font-size:13px;line-height:1.5">
           <strong>${emdName}</strong><br/>
-          실시간 15분: ${data.realtime_15min.toFixed(1)}mm<br/>
-          시간당 예보: <b>${data.forecast_hourly.toFixed(1)}mm/hr</b>
+          ${hasForecast
+            ? `실시간 15분: ${r15}mm<br/>시간당 예보: <b>${fcst}mm/hr</b>`
+            : r60 != null
+              ? `<span style="color:#0ea5e9;font-weight:600">1시간 실측치: ${r60}mm</span>`
+              : `실시간 15분: ${r15}mm`}
         </div>`;
     } else {
       tooltipContent = `<div style="font-size:13px;line-height:1.5">
@@ -274,6 +296,7 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
         </div>
         <div className="flex flex-wrap gap-4 mt-2">
           <div className="legend-item"><div className="legend-color blink-demo" style={{ background: '#dc2626' }}></div>15분↑20mm &amp; 예보↑55mm/hr 알람</div>
+          <div className="legend-item"><span className="text-sky-600 font-medium">1시간 실측치</span> (특보 없을 때)</div>
           <div className="legend-item"><div className="legend-color legend-no-station"></div>관측소 없음</div>
         </div>
       </div>

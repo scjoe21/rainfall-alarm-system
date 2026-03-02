@@ -27,10 +27,12 @@ import {
 const BATCH_SIZE = 5;
 
 // ─── 폴링 간격 ────────────────────────────────────────────────────────────
+// 알람: 15분 실측치 >= 20mm AND 60분 예측치 >= 55mm
+// 호우주의보/경보 있을 때: 5분마다 조건 확인 | 비 없을 때: 30분마다 전국 폴링
 const ALERT_CHECK_IDLE   = 30 * 60 * 1000; // 30분
 const ALERT_CHECK_ACTIVE =  5 * 60 * 1000; // 5분
-const FAST_POLL_INTERVAL =  5 * 60 * 1000; // 5분 (호우주의보/경보 발효 지역)
-const SLOW_POLL_INTERVAL = 30 * 60 * 1000; // 30분 (미발효 지역 / 전국 배경)
+const FAST_POLL_INTERVAL =  5 * 60 * 1000; // 5분 (특보 발효 시)
+const SLOW_POLL_INTERVAL = 30 * 60 * 1000; // 30분 (특보 미발효 / 전국)
 const AWS_REFRESH_INTERVAL = 10 * 60 * 1000; // 10분 (AWS 캐시 전용, 공공 API 미사용)
 
 let alertCheckTimer  = null;
@@ -83,8 +85,12 @@ async function runAwsRefresh() {
     let updated = 0;
     for (const s of stations) {
       const rn15 = s.rn15 ?? getAwsRn15FromCache(s.stn_id, s.lat, s.lon);
+      const rn60 = s.rn60 ?? null;
       if (rn15 !== null && rn15 !== undefined) {
-        saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, rn15, null);
+        saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, rn15, null, rn60);
+        updated++;
+      } else if (rn60 !== null && rn60 !== undefined) {
+        saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, 0, null, rn60);
         updated++;
       }
     }
@@ -230,11 +236,13 @@ async function processAwsStations(label) {
     }
 
     try {
+      const rn60 = awsCacheOk ? (awsStation.rn60 ?? null) : currentRN1ForDelta;
       const alarmResult = await checkAlarmConditionForAwsStation(
         awsStation,
         realtime15min,
         nx,
-        ny
+        ny,
+        rn60
       );
       if (alarmResult.forecastCalled) forecastCalls++;
 
