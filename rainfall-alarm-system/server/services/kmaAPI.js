@@ -9,9 +9,34 @@ function getApihubKey() { return process.env.KMA_APIHUB_KEY; }
 function isMockMode() { return process.env.MOCK_MODE === 'true'; }
 function getDailyLimit() { return parseInt(process.env.KMA_DAILY_LIMIT) || 50000; }
 
+// Cloudflare Worker 프록시 (CLOUDFLARE_WORKER_URL=https://xxx.workers.dev)
+// Worker가 서울 PoP(인천) 경유로 KMA API를 중계 → 한국 IP 요건 충족
+function getWorkerUrl()   { return process.env.CLOUDFLARE_WORKER_URL; }
+function getWorkerToken() { return process.env.CLOUDFLARE_PROXY_TOKEN; }
+
+function getKmaPublicBaseUrl() {
+  const w = getWorkerUrl();
+  return w ? `${w}/kma-public` : BASE_URL;
+}
+
+function getKmaApihubBaseUrl() {
+  const w = getWorkerUrl();
+  return w ? `${w}/kma-apihub` : APIHUB_BASE_URL;
+}
+
+function workerHeaders() {
+  const token = getWorkerToken();
+  return token ? { 'X-Proxy-Token': token } : {};
+}
+
 // 일일 API 호출량 추적
 let apiCallCount = 0;
 let apiCallDate = ''; // 'YYYY-MM-DD' 형식, 날짜 바뀌면 리셋
+
+// 공공 API 쿼터 초과 회로 차단
+// 429 수신 시 즉시 true → 이후 callKmaApi는 HTTP 없이 즉시 에러 반환
+// → 자정(KST)에 일일 카운터 리셋 시 함께 해제
+let publicApiQuotaExceeded = false;
 
 function getKSTDateKey() {
   const now = new Date();
@@ -43,9 +68,15 @@ export async function callKmaApi(operation, params, baseUrl = BASE_URL, bypassLi
   if (apiCallDate !== today) {
     apiCallCount = 0;
     apiCallDate = today;
+    publicApiQuotaExceeded = false; // 자정 리셋 시 circuit breaker 해제
   }
 
   if (!bypassLimit) {
+    // 회로 차단: 429 수신 이후 자정까지 공공 API 호출 차단
+    if (publicApiQuotaExceeded) {
+      throw new Error('KMA public API quota exceeded — circuit breaker active');
+    }
+
     if (apiCallCount >= limit) {
       console.error(`  [API] Daily limit reached (${apiCallCount}/${limit}). Skipping ${operation}`);
       throw new Error(`KMA API daily limit exceeded (${limit})`);
@@ -58,9 +89,13 @@ export async function callKmaApi(operation, params, baseUrl = BASE_URL, bypassLi
     }
   }
 
-  const res = await axios.get(`${baseUrl}/${operation}`, {
+  const effectiveBaseUrl = (baseUrl === BASE_URL) ? getKmaPublicBaseUrl()
+                         : (baseUrl === APIHUB_BASE_URL) ? getKmaApihubBaseUrl()
+                         : baseUrl;
+  const res = await axios.get(`${effectiveBaseUrl}/${operation}`, {
     params: { serviceKey: getApiKey(), ...params },
     timeout: 15000,
+    headers: workerHeaders(),
   });
   return res.data;
 }
@@ -213,15 +248,12 @@ export async function getAWSRealtime15min(stnId, lat, lon) {
     const items = Array.isArray(rawItems) ? rawItems : [rawItems];
 
     // PTY: 강수형태 (0=없음, 1=비, 2=비/눈, 3=눈, 5=빗방울, 6=빗방울눈날림, 7=눈날림)
-    // 관측 시점에 PTY=0이면 현재 강수 없음 → RN1에 이전 시간 잔류값이 있어도 0 반환
-    // 이 처리가 없으면 비가 그친 후에도 RN1 누적값으로 인해 허위 알람이 발생함
-    // PTY 항목 자체가 없거나, obsrValue가 문자열 '0' 또는 숫자 0인 경우 모두 강수 없음으로 처리
+    // ※ PTY=0 필터 제거: 영동형 산지 강수 등 특보 없이 내리는 비는 격자 PTY가 0으로
+    //   수신되더라도 RN1 값 자체는 올바르게 증가한다. delta 계산이 강수 중단을 자연스럽게
+    //   처리하므로(RN1이 늘지 않으면 delta=0) PTY 필터는 불필요하다.
+    //   RN1='강수없음' 문자열 처리로 실제 강수 없음 상태는 이미 걸러진다.
     const ptyItem = items.find(i => i.category === 'PTY');
-    const ptyValue = ptyItem ? parseInt(ptyItem.obsrValue ?? '0', 10) : 0;
-    if (!ptyItem || ptyValue === 0) {
-      console.log(`  [API] PTY=${ptyItem?.obsrValue ?? 'N/A'} → 강수없음, RN1 무시 (${nx},${ny})`);
-      return 0;
-    }
+    console.log(`  [API] PTY=${ptyItem?.obsrValue ?? 'N/A'} for (${nx},${ny})`);
 
     // RN1: 1시간 강수량 (mm)
     const rn1Item = items.find(i => i.category === 'RN1');
@@ -236,9 +268,13 @@ export async function getAWSRealtime15min(stnId, lat, lon) {
     const rainfall = parseFloat(val) || 0;
     if (rainfall < 0) return 0; // 결측값 (-999, -998.9 등) 필터
 
-    console.log(`  [API] PTY=${ptyItem.obsrValue}, RN1=${rainfall}mm for (${nx},${ny})`);
+    console.log(`  [API] PTY=${ptyItem?.obsrValue ?? 'N/A'}, RN1=${rainfall}mm for (${nx},${ny})`);
     return +rainfall.toFixed(1);
   } catch (err) {
+    if (err.response?.status === 429) {
+      publicApiQuotaExceeded = true;
+      console.error('  [API] 429 quota exceeded — circuit breaker 활성화 (자정까지 공공 API 차단)');
+    }
     console.error(`  [API] Ultra short ncst error:`, err.message);
     return 0;
   }
@@ -284,19 +320,13 @@ export async function getForecast45min(nx, ny) {
       return 0;
     }
 
-    // 가장 가까운 예보시간의 PTY 확인
-    // PTY=0이면 해당 시간대에 강수 없음 → RN1 잔류값이 있어도 0 반환
-    // PTY 항목을 찾지 못한 경우에도 강수 없음으로 간주(보수적 판단)
-    // (관측 PTY와 동일한 원칙: 강수 여부 불확실하면 누적값 무시)
+    // ※ PTY=0 필터 제거: 예보 PTY가 0이어도 RN1 예보값 자체를 그대로 사용한다.
+    //   영동형 산지 강수 등 특보 미발효 상황에서도 RN1 예보값이 올바르게 제공된다.
     const firstRn1 = rnItems[0];
     const matchingPty = ptyItems.find(
       p => p.fcstDate === firstRn1.fcstDate && p.fcstTime === firstRn1.fcstTime
     );
-    const forecastPtyValue = matchingPty ? parseInt(matchingPty.fcstValue ?? '0', 10) : 0;
-    if (!matchingPty || forecastPtyValue === 0) {
-      console.log(`  [API] Forecast PTY=${matchingPty?.fcstValue ?? 'N/A'} at ${firstRn1.fcstTime} → 강수없음 예보, RN1 무시 (${nx},${ny})`);
-      return 0;
-    }
+    console.log(`  [API] Forecast PTY=${matchingPty?.fcstValue ?? 'N/A'} at ${firstRn1.fcstTime} for (${nx},${ny})`);
 
     // 초단기예보는 1시간 단위 6시간까지 제공
     // 45분 예측: 가장 가까운 1개 시간대의 RN1값 사용
@@ -308,7 +338,7 @@ export async function getForecast45min(nx, ny) {
       }
     }
 
-    console.log(`  [API] Forecast PTY=${matchingPty?.fcstValue ?? 'N/A'}, RN1=${total}mm for (${nx},${ny})`);
+    console.log(`  [API] Forecast RN1=${total}mm for (${nx},${ny})`);
     return +total.toFixed(1);
   } catch (err) {
     console.error(`  [API] Ultra short fcst error:`, err.message);
@@ -328,13 +358,12 @@ export function clearAwsCache() {
   awsDataCache = null;
 }
 
-// AWS 10분 자료 최신 관측시각 (매 10분 생산, 약 5분 지연)
-function getAws10mBaseTime() {
+// AWS 1분 자료 최신 관측시각 (매분 생산, 약 2분 지연) — nph-aws2_min용
+function getAws1mBaseTime() {
   const kst = getKSTNow();
   let h = kst.getUTCHours();
-  let m = kst.getUTCMinutes() - 5;
+  let m = kst.getUTCMinutes() - 2;
   if (m < 0) { m += 60; h = (h - 1 + 24) % 24; }
-  m = Math.floor(m / 10) * 10;
   return formatDate(kst) + String(h).padStart(2, '0') + String(m).padStart(2, '0');
 }
 
@@ -358,7 +387,7 @@ function parseAwsText(text) {
     tokens.forEach((t, i) => {
       if (t === 'STN' || t === 'ID') colStn = i;
       // 15분 강수량: RN_15M, RN15M, RN15, R15M, 15M 등 패턴
-      else if (/^RN_?15/.test(t) || /^R_?15M?$/.test(t) || t === '15M') colRn15 = i;
+      else if (/^RN[-_]?15/.test(t) || /^R_?15M?$/.test(t) || t === '15M') colRn15 = i;
       else if (t === 'LAT') colLat = i;
       else if (t === 'LON' || t === 'LNG') colLon = i;
     });
@@ -402,32 +431,47 @@ export async function fetchAllAwsData() {
   const apihubKey = getApihubKey();
   if (!apihubKey || apihubKey.startsWith('여기에')) return;
 
-  const tm = getAws10mBaseTime();
+  const tm = getAws1mBaseTime();
   if (awsDataCache && awsDataCache.tm === tm) return; // 이미 최신
 
-  try {
-    console.log(`  [AWS] nph-aws1_10m: tm=${tm} (전국 fetch)`);
+  // 최대 2회 시도 (타임아웃·네트워크 오류 대비)
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      console.log(`  [AWS] nph-aws2_min: tm=${tm} (전국 fetch, 시도 ${attempt}/2)`);
 
-    const res = await axios.get(`${APIHUB_BASE_URL}/nph-aws1_10m`, {
-      params: { tm, stn: 0, help: 1, authKey: apihubKey },
-      timeout: 30000,
-      responseType: 'text',
-    });
+      const res = await axios.get(`${getKmaApihubBaseUrl()}/nph-aws2_min`, {
+        params: { tm, stn: 0, help: 0, authKey: apihubKey },
+        timeout: 60000,
+        responseType: 'text',
+        headers: workerHeaders(),
+      });
 
-    const stations = parseAwsText(res.data);
-    if (!stations || stations.size === 0) {
-      console.warn('  [AWS] 파싱 실패 또는 빈 응답 (컬럼명 확인 필요)');
-      return;
+      const stations = parseAwsText(res.data);
+      if (!stations || stations.size === 0) {
+        console.warn('  [AWS] 파싱 실패 또는 빈 응답 (컬럼명 확인 필요)');
+        if (attempt < 2) { await new Promise(r => setTimeout(r, 5000)); continue; }
+        return;
+      }
+
+      const rn15Count = [...stations.values()].filter(s => s.rn15 !== null).length;
+      const hasCoords = [...stations.values()].some(s => s.lat !== null);
+      awsDataCache = { tm, stations, hasCoords };
+      console.log(`  [AWS] 로드 완료: ${stations.size}개 관측소, RN15 유효 ${rn15Count}개, 좌표 ${hasCoords ? '있음' : '없음'}`);
+      return; // 성공
+
+    } catch (err) {
+      console.error(`  [AWS] fetch 오류 (${attempt}/2):`, err.message);
+      if (attempt < 2) {
+        console.log('  [AWS] 10초 후 재시도...');
+        await new Promise(r => setTimeout(r, 10000));
+      }
     }
-
-    const rn15Count = [...stations.values()].filter(s => s.rn15 !== null).length;
-    const hasCoords = [...stations.values()].some(s => s.lat !== null);
-    awsDataCache = { tm, stations, hasCoords };
-    console.log(`  [AWS] 로드 완료: ${stations.size}개 관측소, RN15 유효 ${rn15Count}개, 좌표 ${hasCoords ? '있음' : '없음'}`);
-
-  } catch (err) {
-    console.error('  [AWS] fetch 오류:', err.message);
   }
+}
+
+/** AWS 캐시 성공 여부 (processStations 폴백 결정에 사용) */
+export function isAwsCacheAvailable() {
+  return awsDataCache !== null && awsDataCache.stations != null && awsDataCache.stations.size > 0;
 }
 
 /**
@@ -579,7 +623,7 @@ export async function getVsrtForecastHourly(nx, ny) {
   if (vsrtGridCache && vsrtGridCache.tmfc === tmfc && vsrtGridCache.tmef === tmef) {
     const val = vsrtGridCache.grid.get(gridKey);
     if (!val) return 0;
-    if (val.pty === 0) return 0;
+    // PTY=0 필터 제거: PTY 무관하게 RN1 예보값을 그대로 반환
     return +val.rn1.toFixed(1);
   }
 
@@ -587,10 +631,11 @@ export async function getVsrtForecastHourly(nx, ny) {
   try {
     console.log(`  [API] nph-dfs_vsrt_grd: tmfc=${tmfc}, tmef=${tmef} (전국 격자 fetch)`);
 
-    const res = await axios.get(`${APIHUB_BASE_URL}/nph-dfs_vsrt_grd`, {
+    const res = await axios.get(`${getKmaApihubBaseUrl()}/nph-dfs_vsrt_grd`, {
       params: { tmfc, tmef, vars: 'RN1:PTY', authKey: apihubKey },
       timeout: 30000,
       responseType: 'text',
+      headers: workerHeaders(),
     });
 
     const grid = parseVsrtGridText(res.data);
@@ -603,11 +648,8 @@ export async function getVsrtForecastHourly(nx, ny) {
       console.warn(`  [API] VSRT (${nx},${ny}) not found in grid`);
       return 0;
     }
-    if (val.pty === 0) {
-      console.log(`  [API] VSRT PTY=0 → 강수없음 예보 (${nx},${ny})`);
-      return 0;
-    }
-    console.log(`  [API] VSRT RN1=${val.rn1}mm for (${nx},${ny})`);
+    // PTY=0 필터 제거: PTY 무관하게 RN1 예보값을 그대로 반환
+    console.log(`  [API] VSRT PTY=${val.pty}, RN1=${val.rn1}mm for (${nx},${ny})`);
     return +val.rn1.toFixed(1);
 
   } catch (err) {

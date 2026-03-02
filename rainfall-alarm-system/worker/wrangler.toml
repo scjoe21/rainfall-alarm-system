@@ -1,0 +1,6 @@
+name            = "rainfall-alarm-proxy"
+main            = "index.js"
+compatibility_date = "2024-01-15"
+
+# PROXY_TOKEN은 평문 저장 금지 — 반드시 시크릿으로 설정:
+#   wrangler secret put PROXY_TOKEN

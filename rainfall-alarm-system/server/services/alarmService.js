@@ -160,13 +160,13 @@ export async function getLatestRainfallByDistrict(districtId) {
       AND rr.id = (
         SELECT MAX(id) FROM rainfall_realtime
         WHERE station_id = ws.id
-          AND timestamp >= datetime('now', '-30 minutes')
+          AND timestamp >= datetime('now', '-60 minutes')
       )
     LEFT JOIN rainfall_forecast rf ON rf.station_id = ws.id
       AND rf.id = (
         SELECT MAX(id) FROM rainfall_forecast
         WHERE station_id = ws.id
-          AND base_time >= datetime('now', '-30 minutes')
+          AND base_time >= datetime('now', '-60 minutes')
       )
     WHERE e.district_id = ?
   `).all(districtId);

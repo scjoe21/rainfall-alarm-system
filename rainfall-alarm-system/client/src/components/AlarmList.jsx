@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
 
-const ALARM_DURATION_MS = 4 * 60 * 1000 + 50 * 1000; // 4분 50초
+const ALARM_DURATION_MS = 5 * 60 * 1000 + 30 * 1000; // 5분 30초 (폴링 5분 + 실행 여유)
 
 function AlarmList({ districtId, metroId }) {
   const [alarms, setAlarms] = useState([]);
@@ -18,7 +18,7 @@ function AlarmList({ districtId, metroId }) {
 
       setAlarms(prev => [{ ...alarm, _id: alarmId }, ...prev].slice(0, 20));
 
-      // 4분 50초 후 자동 만료
+      // 5분 30초 후 자동 만료
       const tid = setTimeout(() => {
         setAlarms(prev => prev.filter(a => a._id !== alarmId));
       }, ALARM_DURATION_MS);

@@ -13,11 +13,15 @@ let db = null;
 class DatabaseWrapper {
   constructor(sqlDb) {
     this._db = sqlDb;
+    this._dirty = false;
+    // 5초마다 변경된 내용만 저장 (매 INSERT마다 전체 DB를 쓰는 병목 방지)
+    this._saveTimer = setInterval(() => this._flushIfDirty(), 5000);
+    if (this._saveTimer.unref) this._saveTimer.unref(); // Node 종료를 막지 않음
   }
 
   exec(sql) {
     this._db.run(sql);
-    this._save();
+    this._save(); // 스키마 변경 등 즉시 저장 필요한 경우
   }
 
   prepare(sql) {
@@ -25,7 +29,7 @@ class DatabaseWrapper {
     return {
       run(...params) {
         self._db.run(sql, params);
-        self._save();
+        self._dirty = true; // 즉시 저장 대신 dirty 마킹 → 타이머가 주기적으로 저장
       },
       get(...params) {
         const stmt = self._db.prepare(sql);
@@ -52,8 +56,13 @@ class DatabaseWrapper {
   }
 
   close() {
+    clearInterval(this._saveTimer);
     this._save();
     this._db.close();
+  }
+
+  _flushIfDirty() {
+    if (this._dirty) this._save();
   }
 
   _save() {
@@ -61,6 +70,7 @@ class DatabaseWrapper {
       const data = this._db.export();
       const buffer = Buffer.from(data);
       fs.writeFileSync(dbPath, buffer);
+      this._dirty = false;
     } catch (e) {
       console.error('DB save error:', e.message);
     }

@@ -4,7 +4,7 @@
 #
 
 app = 'rainfall-alarm-kr'
-primary_region = 'nrt'
+primary_region = 'sin'
 
 [build]
 
@@ -12,6 +12,7 @@ primary_region = 'nrt'
   NODE_ENV = 'production'
   PORT = '3000'
   DB_DIR = '/app/db'
+  KMA_DAILY_LIMIT = '1000000'
 
 [mounts]
   source = 'rainfall_data'
