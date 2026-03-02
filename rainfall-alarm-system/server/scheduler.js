@@ -69,9 +69,12 @@ function scheduleAwsRefresh(delayMs) {
 // ─── 10분 AWS 단독 갱신: APIHUB 1회 호출, 공공 API 0회 ──────────────────
 // fetchAllAwsData()로 전국 AWS 자료를 캐시에 올린 뒤,
 // aws_rainfall 테이블에 관측소별 15분 강수량 갱신.
+// 폴백 시 우선 처리할 관측소 (세종·조치원·대전 등 비가 와도 수치가 안 나오던 지역)
+const FALLBACK_PRIORITY_STN_IDS = ['360', '861', '133', '232', '131', '108', '119', '112'];
+
 async function runAwsRefresh() {
   try {
-    clearAwsCache();
+    // clearAwsCache 제거: fetch 실패 시 이전 캐시 유지하여 데이터 공백 방지
     await fetchAllAwsData();
 
     let stations = getAwsStationsWithRainfall();
@@ -79,9 +82,10 @@ async function runAwsRefresh() {
 
     let updated = 0;
     if (stations.length === 0) {
-      // APIHUB 실패 시 공공 API 폴백: 주요 관측소 25개만 조회하여 aws_rainfall 갱신
       const fallback = getAwsStationsForFallback();
-      const toProcess = fallback.slice(0, 25);
+      const priority = fallback.filter(s => FALLBACK_PRIORITY_STN_IDS.includes(String(s.stn_id)));
+      const rest = fallback.filter(s => !FALLBACK_PRIORITY_STN_IDS.includes(String(s.stn_id))).slice(0, 27);
+      const toProcess = [...priority, ...rest].slice(0, 35);
       if (toProcess.length > 0) {
         console.log(`  [AWS10m] APIHUB 없음 → 공공 API 폴백 ${toProcess.length}개 관측소`);
         for (let i = 0; i < toProcess.length; i++) {
