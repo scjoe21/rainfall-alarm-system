@@ -108,7 +108,8 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
         setEmdGeoJSON(geojson);
         if (!geojson?.features?.length) setNoData(true);
         const map = {};
-        rainfall.forEach(item => {
+        (Array.isArray(rainfall) ? rainfall : []).forEach(item => {
+          if (!item?.emd_code) return;
           map[item.emd_code] = {
             realtime_15min: item.realtime_15min ?? 0,
             realtime_1hour: item.realtime_1hour ?? null,
@@ -116,6 +117,12 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
             station_name: item.station_name || null,
           };
         });
+        if (geojson?.features?.length && Object.keys(map).length === 0) {
+          geojson.features.forEach(f => {
+            const cd = f.properties?.EMD_CD;
+            if (cd) map[cd] = { realtime_15min: 0, realtime_1hour: null, forecast_hourly: 0, station_name: null };
+          });
+        }
         setRainfallData(map);
         setLastUpdated(new Date());
         setLoading(false);
@@ -220,34 +227,27 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
     // layer 참조 저장 (깜빡임용)
     layerMapRef.current[emdCode] = layer;
 
-    // 툴팁: 특보 있을 때 15분+예보, 특보 없을 때 1시간 실측치 별도 란
+    // 툴팁: 3개 란 (1시간 실측치, 15분 실측치, 1시간 예측치)
+    const fmt = (v) => (v != null && !isNaN(v) ? Number(v).toFixed(1) : '–');
+    const r1h = data?.realtime_1hour;
+    const r15 = data?.realtime_15min ?? 0;
+    const fcst = data?.forecast_hourly ?? 0;
+
     let tooltipContent;
     if (data && data.station_name) {
-      const hasForecast = (data.forecast_hourly ?? 0) > 0;
-      const r15 = (data.realtime_15min ?? 0).toFixed(1);
-      const r60 = data.realtime_1hour != null ? data.realtime_1hour.toFixed(1) : null;
-      const fcst = (data.forecast_hourly ?? 0).toFixed(1);
-      tooltipContent = `<div style="font-size:13px;line-height:1.5">
+      tooltipContent = `<div style="font-size:13px;line-height:1.6">
           <strong>${emdName}</strong><br/>
           관측소: ${data.station_name}<br/>
-          ${hasForecast
-            ? `실시간 15분: ${r15}mm<br/>시간당 예보: <b>${fcst}mm/hr</b>`
-            : r60 != null
-              ? `<span style="color:#0ea5e9;font-weight:600">1시간 실측치: ${r60}mm</span>`
-              : `실시간 15분: ${r15}mm`}
+          <span style="color:#0ea5e9">1시간 실측치: ${fmt(r1h)}mm</span><br/>
+          15분 실측치: ${fmt(r15)}mm<br/>
+          1시간 예측치: <b>${fmt(fcst)}mm/hr</b>
         </div>`;
     } else if (data) {
-      const hasForecast = (data.forecast_hourly ?? 0) > 0;
-      const r15 = (data.realtime_15min ?? 0).toFixed(1);
-      const r60 = data.realtime_1hour != null ? data.realtime_1hour.toFixed(1) : null;
-      const fcst = (data.forecast_hourly ?? 0).toFixed(1);
-      tooltipContent = `<div style="font-size:13px;line-height:1.5">
+      tooltipContent = `<div style="font-size:13px;line-height:1.6">
           <strong>${emdName}</strong><br/>
-          ${hasForecast
-            ? `실시간 15분: ${r15}mm<br/>시간당 예보: <b>${fcst}mm/hr</b>`
-            : r60 != null
-              ? `<span style="color:#0ea5e9;font-weight:600">1시간 실측치: ${r60}mm</span>`
-              : `실시간 15분: ${r15}mm`}
+          <span style="color:#0ea5e9">1시간 실측치: ${fmt(r1h)}mm</span><br/>
+          15분 실측치: ${fmt(r15)}mm<br/>
+          1시간 예측치: <b>${fmt(fcst)}mm/hr</b>
         </div>`;
     } else {
       tooltipContent = `<div style="font-size:13px;line-height:1.5">

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { getDatabase } from '../config/database.js';
 import alarmService from '../services/alarmService.js';
 import { getCurrentAlertState } from '../services/weatherAlertService.js';
-import { getApiUsage } from '../services/kmaAPI.js';
+import { getApiUsage, isAwsCacheAvailable } from '../services/kmaAPI.js';
 import { emitAlarm } from '../websocket.js';
 import fs from 'fs';
 import path from 'path';
@@ -11,6 +11,55 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const router = Router();
 const MAX_LIMIT = 100;
+
+// API/연결 진단 (실측치 미표시 시 원인 파악용)
+router.get('/status', async (req, res) => {
+  const db = await getDatabase();
+  const awsCount = db.prepare(
+    "SELECT COUNT(*) as c FROM aws_rainfall WHERE updated_at >= datetime('now', '-60 minutes')"
+  ).get()?.c ?? 0;
+  const rrCount = db.prepare(
+    "SELECT COUNT(*) as c FROM rainfall_realtime WHERE timestamp >= datetime('now', '-60 minutes')"
+  ).get()?.c ?? 0;
+  const wsCount = db.prepare('SELECT COUNT(*) as c FROM weather_stations').get()?.c ?? 0;
+
+  const hasKmaKey = !!process.env.KMA_API_KEY && !process.env.KMA_API_KEY.startsWith('your_');
+  const hasApihubKey = !!process.env.KMA_APIHUB_KEY && !process.env.KMA_APIHUB_KEY.startsWith('여기에');
+  const hasWorkerUrl = !!process.env.CLOUDFLARE_WORKER_URL;
+  const region = process.env.FLY_REGION || 'unknown';
+
+  // 공공 API 실제 연결 테스트 (서울 격자 1회)
+  let apiTest = null;
+  if (hasKmaKey && req.query.test === '1') {
+    try {
+      const { getAWSRealtime15min } = await import('../services/kmaAPI.js');
+      const rn1 = await getAWSRealtime15min('108', 37.571, 126.966);
+      apiTest = { ok: true, rn1, message: '공공 API 연결 성공' };
+    } catch (e) {
+      apiTest = { ok: false, error: e.message, message: '공공 API 실패 - IP 제한 또는 키 오류 가능' };
+    }
+  }
+
+  res.json({
+    config: {
+      KMA_API_KEY: hasKmaKey ? 'ok' : 'missing',
+      KMA_APIHUB_KEY: hasApihubKey ? 'ok' : 'missing',
+      CLOUDFLARE_WORKER_URL: hasWorkerUrl ? 'ok' : 'missing',
+      FLY_REGION: region,
+      MOCK_MODE: process.env.MOCK_MODE === 'true',
+    },
+    data: {
+      aws_rainfall_1h: awsCount,
+      rainfall_realtime_1h: rrCount,
+      weather_stations: wsCount,
+      aws_cache_available: isAwsCacheAvailable(),
+    },
+    apiTest,
+    hint: !hasWorkerUrl
+      ? 'CLOUDFLARE_WORKER_URL을 설정하여 기상청 API 프록시(한국 PoP 경유)를 사용하세요. worker/ 폴더에서 wrangler deploy 후 URL을 설정합니다.'
+      : null,
+  });
+});
 
 // 기상특보 상태 조회
 router.get('/alert-status', (req, res) => {

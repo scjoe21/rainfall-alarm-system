@@ -285,7 +285,7 @@ export async function syncAwsToRainfallRealtime() {
     if (ws.lat == null || ws.lon == null) continue;
 
     let nearest = null;
-    let minDist = 0.5; // ~55km 이내
+    let minDist = 2.0; // ~140km 이내 (기존 0.5는 ~78km, 매칭 실패 시 확대)
 
     for (const aws of awsRows) {
       if (aws.lat == null || aws.lon == null) continue;

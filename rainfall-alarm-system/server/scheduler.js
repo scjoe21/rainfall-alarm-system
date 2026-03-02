@@ -6,6 +6,7 @@ import {
   getPrevAwsGridRN1,
   logAwsAlarm,
   syncAwsToRainfallRealtime,
+  saveAwsRainfall,
 } from './services/alarmService.js';
 import { emitAlarm, emitAlertState } from './websocket.js';
 import {
@@ -73,29 +74,51 @@ async function runAwsRefresh() {
     clearAwsCache();
     await fetchAllAwsData();
 
-    const stations = getAwsStationsWithRainfall();
-    if (stations.length === 0) {
-      console.log('  [AWS10m] 캐시 없음 - 폴백 모드에서는 DB 갱신 스킵');
-      scheduleAwsRefresh(AWS_REFRESH_INTERVAL);
-      return;
-    }
-
+    let stations = getAwsStationsWithRainfall();
     const db = await getDatabase();
-    const { saveAwsRainfall } = await import('./services/alarmService.js');
+
     let updated = 0;
-    for (const s of stations) {
-      const rn15 = s.rn15 ?? getAwsRn15FromCache(s.stn_id, s.lat, s.lon);
-      const rn60 = s.rn60 ?? null;
-      if (rn15 !== null && rn15 !== undefined) {
-        saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, rn15, null, rn60);
-        updated++;
-      } else if (rn60 !== null && rn60 !== undefined) {
-        saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, 0, null, rn60);
-        updated++;
+    if (stations.length === 0) {
+      // APIHUB 실패 시 공공 API 폴백: 주요 관측소 25개만 조회하여 aws_rainfall 갱신
+      const fallback = getAwsStationsForFallback();
+      const toProcess = fallback.slice(0, 25);
+      if (toProcess.length > 0) {
+        console.log(`  [AWS10m] APIHUB 없음 → 공공 API 폴백 ${toProcess.length}개 관측소`);
+        for (let i = 0; i < toProcess.length; i++) {
+          if (i > 0) await new Promise(r => setTimeout(r, 1500));
+          const s = toProcess[i];
+          try {
+            const rn1 = await getAWSRealtime15min(s.stn_id, s.lat, s.lon);
+            const gridKey = `${convertToGrid(s.lat, s.lon).nx},${convertToGrid(s.lat, s.lon).ny}`;
+            const prev = getPrevAwsGridRN1(gridKey);
+            const rn15 = (prev != null && rn1 >= prev) ? +(rn1 - prev).toFixed(1) : 0;
+            updateAwsGridRN1(gridKey, rn1);
+            saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, rn15, null, rn1);
+            updated++;
+          } catch (e) {
+            console.warn(`  [AWS10m] 폴백 ${s.name} 오류:`, e.message);
+          }
+        }
+      } else {
+        console.log('  [AWS10m] 캐시 없음, 폴백 목록 없음 - DB 갱신 스킵');
+        scheduleAwsRefresh(AWS_REFRESH_INTERVAL);
+        return;
+      }
+    } else {
+      for (const s of stations) {
+        const rn15 = s.rn15 ?? getAwsRn15FromCache(s.stn_id, s.lat, s.lon);
+        const rn60 = s.rn60 ?? null;
+        if (rn15 !== null && rn15 !== undefined) {
+          saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, rn15, null, rn60);
+          updated++;
+        } else if (rn60 !== null && rn60 !== undefined) {
+          saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, 0, null, rn60);
+          updated++;
+        }
       }
     }
 
-    console.log(`  [AWS10m] ${updated}/${stations.length}개 AWS 관측소 갱신 (공공 API 0회)`);
+    console.log(`  [AWS10m] ${updated}개 AWS 관측소 갱신`);
     const synced = await syncAwsToRainfallRealtime();
     if (synced > 0) console.log(`  [AWS10m] → rainfall_realtime 동기화 ${synced}개`);
   } catch (err) {
@@ -114,6 +137,8 @@ export function startScheduler() {
   const firstAwsDelay = msUntilNextAwsPoll();
   console.log(`  [AWS10m] 첫 갱신까지 ${(firstAwsDelay / 60000).toFixed(1)}분 대기 (KMA :07/:17/:27... 정렬)`);
   scheduleAwsRefresh(firstAwsDelay);
+  // 서버 기동 직후 30초에 1회 즉시 실행 → 초기 화면에 수치 표시
+  setTimeout(() => runAwsRefresh(), 30 * 1000);
 }
 
 function scheduleAlertCheck(delayMs) {
