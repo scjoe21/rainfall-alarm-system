@@ -248,6 +248,61 @@ export async function getAlarmCountsByMetro(metroId) {
   return counts;
 }
 
+/**
+ * AWS 관측소 데이터를 rainfall_realtime/rainfall_forecast에 동기화
+ * → 기존 클라이언트(읍면동 맵)가 15분 실측치를 표시할 수 있도록 함
+ */
+export async function syncAwsToRainfallRealtime() {
+  const db = await getDatabase();
+  const awsRows = db.prepare(`
+    SELECT stn_id, lat, lon, rainfall_15min, forecast_hourly
+    FROM aws_rainfall
+    WHERE updated_at >= datetime('now', '-60 minutes')
+      AND rainfall_15min IS NOT NULL
+  `).all();
+
+  if (awsRows.length === 0) return 0;
+
+  const weatherStations = db.prepare(
+    'SELECT id, lat, lon FROM weather_stations'
+  ).all();
+
+  const insertRealtime = db.prepare(
+    'INSERT INTO rainfall_realtime (station_id, rainfall_15min) VALUES (?, ?)'
+  );
+  const insertForecast = db.prepare(`
+    INSERT INTO rainfall_forecast (station_id, base_time, forecast_time, rainfall_forecast)
+    VALUES (?, datetime('now'), datetime('now', '+1 hour'), ?)
+  `);
+
+  let synced = 0;
+  for (const ws of weatherStations) {
+    if (ws.lat == null || ws.lon == null) continue;
+
+    let nearest = null;
+    let minDist = 0.5; // ~55km 이내
+
+    for (const aws of awsRows) {
+      if (aws.lat == null || aws.lon == null) continue;
+      const d = (aws.lat - ws.lat) ** 2 + (aws.lon - ws.lon) ** 2;
+      if (d < minDist) {
+        minDist = d;
+        nearest = aws;
+      }
+    }
+
+    if (nearest) {
+      const rn15 = nearest.rainfall_15min ?? 0;
+      const fcst = nearest.forecast_hourly ?? 0;
+      insertRealtime.run(ws.id, rn15);
+      insertForecast.run(ws.id, fcst);
+      synced++;
+    }
+  }
+
+  return synced;
+}
+
 export async function getLatestRainfallByDistrict(districtId) {
   const db = await getDatabase();
   // ─── 실측값: DB에 저장된 실제 15분 강수량 직접 조회 ─────────────────────
@@ -287,6 +342,7 @@ export default {
   updateGridRN1,
   updateAwsGridRN1,
   saveAwsRainfall,
+  syncAwsToRainfallRealtime,
   getLatestRainfallByAwsStation,
   getAwsAlarmLogs,
   logAwsAlarm,

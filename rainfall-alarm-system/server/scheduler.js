@@ -5,6 +5,7 @@ import {
   updateAwsGridRN1,
   getPrevAwsGridRN1,
   logAwsAlarm,
+  syncAwsToRainfallRealtime,
 } from './services/alarmService.js';
 import { emitAlarm, emitAlertState } from './websocket.js';
 import {
@@ -89,6 +90,8 @@ async function runAwsRefresh() {
     }
 
     console.log(`  [AWS10m] ${updated}/${stations.length}개 AWS 관측소 갱신 (공공 API 0회)`);
+    const synced = await syncAwsToRainfallRealtime();
+    if (synced > 0) console.log(`  [AWS10m] → rainfall_realtime 동기화 ${synced}개`);
   } catch (err) {
     console.error('[AWS10m] 갱신 오류:', err.message);
   }
@@ -192,11 +195,6 @@ async function processAwsStations(label) {
   const startTime = Date.now();
   console.log(`[${new Date().toISOString()}] [${label}] Processing ${stations.length} AWS stations...`);
 
-  clearForecastCache();
-  clearVsrtGridCache();
-  clearAwsCache();
-  await fetchAllAwsData();
-
   const awsCacheOk = isAwsCacheAvailable();
   console.log(`  [${label}] AWS캐시: ${awsCacheOk ? '사용가능' : '없음(폴백제한)'}`);
 
@@ -262,10 +260,22 @@ async function processAwsStations(label) {
     }
   }
 
+  // AWS → rainfall_realtime 동기화 (기존 읍면동 맵 클라이언트용)
+  try {
+    const synced = await syncAwsToRainfallRealtime();
+    if (synced > 0) {
+      console.log(`  [${label}] Synced ${synced} weather_stations from AWS → rainfall_realtime`);
+    }
+  } catch (syncErr) {
+    console.error(`  [${label}] Sync error:`, syncErr.message);
+  }
+
   // 오래된 데이터 정리
   try {
     const db = await getDatabase();
     db.prepare("DELETE FROM aws_alarm_logs WHERE timestamp < datetime('now', '-1 hour')").run();
+    db.prepare("DELETE FROM rainfall_realtime WHERE timestamp < datetime('now', '-1 hour')").run();
+    db.prepare("DELETE FROM rainfall_forecast WHERE base_time < datetime('now', '-1 hour')").run();
   } catch (cleanupErr) {
     console.error(`  [${label}] Cleanup error:`, cleanupErr.message);
   }
