@@ -155,19 +155,13 @@ export async function checkAlarmConditionForAwsStation(awsStation, preloadedReal
     }
   }
 
-  // 15분 실측치 < 20mm: 예보 조회 생략, 실측치만 저장 (1시간 실측치는 특보 없을 때 표시용)
-  if (realtime15min < REALTIME_THRESHOLD) {
-    saveAwsRainfall(db, awsStation.stn_id, awsStation.name, awsStation.lat, awsStation.lon, realtime15min, 0, rainfall1hour);
-    return { realtime15min, forecastHourly: 0, alarm: false, forecastCalled: false };
-  }
-
   const nx = preloadedNx ?? kma.convertToGrid(awsStation.lat, awsStation.lon).nx;
   const ny = preloadedNy ?? kma.convertToGrid(awsStation.lat, awsStation.lon).ny;
   const gridKey = `${nx},${ny}`;
 
+  // 1시간 예측치: 항상 조회·저장 (표시용, 눈/가벼운 비에서도 표시)
   let forecastHourly;
   let forecastCalled = false;
-
   if (gridKey in forecastCache) {
     forecastHourly = forecastCache[gridKey];
   } else {
@@ -179,10 +173,9 @@ export async function checkAlarmConditionForAwsStation(awsStation, preloadedReal
   saveAwsRainfall(db, awsStation.stn_id, awsStation.name, awsStation.lat, awsStation.lon, realtime15min, forecastHourly, rainfall1hour);
 
   // 알람: 15분 실측치 >= 20mm AND 60분 예측치 >= 55mm
-  if (forecastHourly >= FORECAST_THRESHOLD) {
+  if (realtime15min >= REALTIME_THRESHOLD && forecastHourly >= FORECAST_THRESHOLD) {
     return { realtime15min, forecastHourly, alarm: true, forecastCalled };
   }
-
   return { realtime15min, forecastHourly, alarm: false, forecastCalled };
 }
 
@@ -263,7 +256,7 @@ export async function syncAwsToRainfallRealtime() {
     SELECT stn_id, lat, lon, rainfall_15min, rainfall_1hour, forecast_hourly
     FROM aws_rainfall
     WHERE updated_at >= datetime('now', '-60 minutes')
-      AND (rainfall_15min IS NOT NULL OR rainfall_1hour IS NOT NULL)
+      AND (rainfall_15min IS NOT NULL OR rainfall_1hour IS NOT NULL OR forecast_hourly IS NOT NULL)
   `).all();
 
   if (awsRows.length === 0) return 0;

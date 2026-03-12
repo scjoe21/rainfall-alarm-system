@@ -12,8 +12,10 @@ import { emitAlarm, emitAlertState } from './websocket.js';
 import {
   convertToGrid,
   getAWSRealtime15min,
+  getVsrtForecastHourly,
   clearVsrtGridCache,
   clearAwsCache,
+  clearNcstGridCache,
   fetchAllAwsData,
   isAwsCacheAvailable,
   getAwsStationsWithRainfall,
@@ -74,18 +76,27 @@ const FALLBACK_PRIORITY_STN_IDS = ['360', '861', '133', '232', '131', '108', '11
 
 async function runAwsRefresh() {
   try {
-    // clearAwsCache 제거: fetch 실패 시 이전 캐시 유지하여 데이터 공백 방지
     await fetchAllAwsData();
+    clearNcstGridCache(); // 공공 API 격자 캐시 초기화
 
     let stations = getAwsStationsWithRainfall();
     const db = await getDatabase();
+
+    // APIHUB가 전부 0 반환 시 신뢰 불가 → 공공 API 사용 (며칠째 0만 나오는 문제 해결)
+    const allZeros = stations.length > 0 && stations.every(s =>
+      ((s.rn15 ?? 0) === 0 && (s.rn60 ?? 0) === 0)
+    );
+    if (allZeros) {
+      stations = [];
+      console.log('  [AWS10m] APIHUB 전부 0 → 공공 API(초단기실황) 사용');
+    }
 
     let updated = 0;
     if (stations.length === 0) {
       const fallback = getAwsStationsForFallback();
       const priority = fallback.filter(s => FALLBACK_PRIORITY_STN_IDS.includes(String(s.stn_id)));
-      const rest = fallback.filter(s => !FALLBACK_PRIORITY_STN_IDS.includes(String(s.stn_id))).slice(0, 27);
-      const toProcess = [...priority, ...rest].slice(0, 35);
+      const rest = fallback.filter(s => !FALLBACK_PRIORITY_STN_IDS.includes(String(s.stn_id)));
+      const toProcess = [...priority, ...rest].slice(0, 80); // 35→80: 전국 1시간 예측치 표시 커버리지 확대
       if (toProcess.length > 0) {
         console.log(`  [AWS10m] APIHUB 없음 → 공공 API 폴백 ${toProcess.length}개 관측소`);
         for (let i = 0; i < toProcess.length; i++) {
@@ -93,11 +104,12 @@ async function runAwsRefresh() {
           const s = toProcess[i];
           try {
             const rn1 = await getAWSRealtime15min(s.stn_id, s.lat, s.lon);
-            const gridKey = `${convertToGrid(s.lat, s.lon).nx},${convertToGrid(s.lat, s.lon).ny}`;
-            const prev = getPrevAwsGridRN1(gridKey);
+            const { nx, ny } = convertToGrid(s.lat, s.lon);
+            const prev = getPrevAwsGridRN1(`${nx},${ny}`);
             const rn15 = (prev != null && rn1 >= prev) ? +(rn1 - prev).toFixed(1) : 0;
-            updateAwsGridRN1(gridKey, rn1);
-            saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, rn15, null, rn1);
+            updateAwsGridRN1(`${nx},${ny}`, rn1);
+            const forecastHourly = await getVsrtForecastHourly(nx, ny);
+            saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, rn15, forecastHourly, rn1);
             updated++;
           } catch (e) {
             console.warn(`  [AWS10m] 폴백 ${s.name} 오류:`, e.message);
@@ -112,12 +124,36 @@ async function runAwsRefresh() {
       for (const s of stations) {
         const rn15 = s.rn15 ?? getAwsRn15FromCache(s.stn_id, s.lat, s.lon);
         const rn60 = s.rn60 ?? null;
-        if (rn15 !== null && rn15 !== undefined) {
-          saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, rn15, null, rn60);
-          updated++;
-        } else if (rn60 !== null && rn60 !== undefined) {
-          saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, 0, null, rn60);
-          updated++;
+        const { nx, ny } = convertToGrid(s.lat, s.lon);
+        const forecastHourly = await getVsrtForecastHourly(nx, ny);
+        // rn15/rn60 둘 다 null이어도 저장 → 1시간 예측치 전국 표시를 위해 aws_rainfall에 포함
+        const rn15Val = (rn15 !== null && rn15 !== undefined) ? rn15 : 0;
+        const rn60Val = (rn60 !== null && rn60 !== undefined) ? rn60 : null;
+        saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, rn15Val, forecastHourly, rn60Val);
+        updated++;
+      }
+      // APIHUB 파싱은 성공했으나 RN 컬럼 미발견(전부 null) → 공공 API 폴백
+      if (updated === 0 && stations.length > 0) {
+        const fallback = getAwsStationsForFallback();
+        const toProcess = fallback.slice(0, 80); // 35→80: 전국 1시간 예측치 표시 커버리지 확대
+        if (toProcess.length > 0) {
+          console.log(`  [AWS10m] APIHUB RN컬럼 없음 → 공공 API 폴백 ${toProcess.length}개`);
+          for (let i = 0; i < toProcess.length; i++) {
+            if (i > 0) await new Promise(r => setTimeout(r, 1500));
+            const s = toProcess[i];
+            try {
+              const rn1 = await getAWSRealtime15min(s.stn_id, s.lat, s.lon);
+              const { nx, ny } = convertToGrid(s.lat, s.lon);
+              const prev = getPrevAwsGridRN1(`${nx},${ny}`);
+              const rn15 = (prev != null && rn1 >= prev) ? +(rn1 - prev).toFixed(1) : 0;
+              updateAwsGridRN1(`${nx},${ny}`, rn1);
+              const forecastHourly = await getVsrtForecastHourly(nx, ny);
+              saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, rn15, forecastHourly, rn1);
+              updated++;
+            } catch (e) {
+              console.warn(`  [AWS10m] 폴백 ${s.name} 오류:`, e.message);
+            }
+          }
         }
       }
     }
