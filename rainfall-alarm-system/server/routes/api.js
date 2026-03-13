@@ -40,6 +40,19 @@ router.get('/status', async (req, res) => {
     }
   }
 
+  // 1시간 예측치 API 테스트 (서울 격자, ?test=2)
+  let forecastTest = null;
+  if (req.query.test === '2') {
+    try {
+      const { convertToGrid, getVsrtForecastHourly } = await import('../services/kmaAPI.js');
+      const { nx, ny } = convertToGrid(37.571, 126.966);
+      const forecast = await getVsrtForecastHourly(nx, ny);
+      forecastTest = { ok: true, nx, ny, forecast_hourly: forecast, message: '1시간 예측치 조회 성공' };
+    } catch (e) {
+      forecastTest = { ok: false, error: e.message, message: '1시간 예측치 API 실패' };
+    }
+  }
+
   res.json({
     config: {
       KMA_API_KEY: hasKmaKey ? 'ok' : 'missing',
@@ -55,6 +68,7 @@ router.get('/status', async (req, res) => {
       aws_cache_available: isAwsCacheAvailable(),
     },
     apiTest,
+    forecastTest,
     hint: !hasWorkerUrl
       ? 'CLOUDFLARE_WORKER_URL을 설정하여 기상청 API 프록시(한국 PoP 경유)를 사용하세요. worker/ 폴더에서 wrangler deploy 후 URL을 설정합니다.'
       : null,
@@ -258,6 +272,52 @@ router.post('/debug/trigger-alarm', (req, res) => {
   });
 
   res.json({ ok: true, triggered: { emdCode, districtId, realtime15min: realtime, forecastHourly: forecast } });
+});
+
+// 디버그: APIHUB nph-aws2_min 파싱 결과 (1번 확인용)
+router.get('/debug/aws-parse', async (req, res) => {
+  try {
+    const { fetchAwsDebug } = await import('../services/kmaAPI.js');
+    const result = await fetchAwsDebug();
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 디버그: nph-aws2_stn 좌표 제공 개수 확인 (Step 1)
+router.get('/debug/aws-stn-coords', async (req, res) => {
+  try {
+    const { fetchAwsStnCoordsDebug } = await import('../services/kmaAPI.js');
+    const result = await fetchAwsStnCoordsDebug();
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 디버그: typ02 getAwsStnLstTbl 활용신청 완료 여부 확인
+router.get('/debug/typ02-aws-stn', async (req, res) => {
+  try {
+    const { fetchTyp02AwsStnLstTblDebug } = await import('../services/kmaAPI.js');
+    const result = await fetchTyp02AwsStnLstTblDebug();
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 디버그: 공공 API 초단기실황 원시 응답 (2번 확인용)
+router.get('/debug/ncst-raw', async (req, res) => {
+  try {
+    const { getNcstDebug } = await import('../services/kmaAPI.js');
+    const lat = parseFloat(req.query.lat) || 36.48;
+    const lon = parseFloat(req.query.lon) || 127.259;
+    const result = await getNcstDebug(lat, lon);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // 알람 로그 전체 초기화 (허위 알람 발생 시 수동 정리용)

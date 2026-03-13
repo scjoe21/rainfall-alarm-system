@@ -29,6 +29,12 @@ function getKmaApihubBaseUrl() {
   return w ? `${w}/kma-apihub` : APIHUB_BASE_URL;
 }
 
+const AWS1MI_BASE_URL = 'https://apis.data.go.kr/1360000/Aws1miInfoService';
+function getKmaAws1miBaseUrl() {
+  const w = getWorkerUrl();
+  return w ? `${w}/kma-aws1mi` : AWS1MI_BASE_URL;
+}
+
 function workerHeaders() {
   const token = getWorkerToken();
   return token ? { 'X-Proxy-Token': token } : {};
@@ -217,21 +223,28 @@ function generateMockForecast() {
   return +(Math.random() * 40).toFixed(1);
 }
 
-// 초단기실황 조회 - 현재 1시간 슬라이딩 누적 강수량 (RN1) 반환
-// ※ 이 값 자체가 15분 강수량이 아님.
-//   진짜 15분 강수량은 alarmService.checkAlarmCondition 에서
-//   이전 폴링의 RN1 과 차분(delta)하여 계산한다.
-export async function getAWSRealtime15min(stnId, lat, lon) {
-  if (isMockMode()) {
-    return generateMockRealtime();
+// 격자별 RN1 캐시 (한 배치 내 중복 API 호출 방지)
+let ncstGridCache = null; // { baseKey, grid: Map<'nx,ny', rn1> }
+
+export function clearNcstGridCache() {
+  ncstGridCache = null;
+}
+
+/** 격자 좌표로 RN1(1시간 강수량) 조회 — 배치 내 캐시 사용 */
+async function getRN1ForGrid(nx, ny) {
+  if (isMockMode()) return generateMockRealtime();
+
+  const { baseDate, baseTime } = getUltraSrtNcstBaseTime();
+  const baseKey = `${baseDate}_${baseTime}`;
+
+  if (ncstGridCache && ncstGridCache.baseKey === baseKey) {
+    const cached = ncstGridCache.grid.get(`${nx},${ny}`);
+    if (cached !== undefined) return cached;
+  } else {
+    ncstGridCache = { baseKey, grid: new Map() };
   }
 
   try {
-    const { nx, ny } = convertToGrid(lat, lon);
-    const { baseDate, baseTime } = getUltraSrtNcstBaseTime();
-
-    console.log(`  [API] getUltraSrtNcst: base=${baseDate} ${baseTime}, nx=${nx}, ny=${ny}`);
-
     const data = await callKmaApi('getUltraSrtNcst', {
       numOfRows: 10,
       pageNo: 1,
@@ -244,8 +257,7 @@ export async function getAWSRealtime15min(stnId, lat, lon) {
 
     const body = data?.response?.body;
     if (!body || !body.items) {
-      console.error(`  [API] No data returned for ncst (${nx},${ny})`);
-      console.error(`  [API] Response:`, JSON.stringify(data?.response?.header));
+      ncstGridCache.grid.set(`${nx},${ny}`, 0);
       return 0;
     }
 
@@ -258,23 +270,30 @@ export async function getAWSRealtime15min(stnId, lat, lon) {
     //   처리하므로(RN1이 늘지 않으면 delta=0) PTY 필터는 불필요하다.
     //   RN1='강수없음' 문자열 처리로 실제 강수 없음 상태는 이미 걸러진다.
     const ptyItem = items.find(i => i.category === 'PTY');
-    console.log(`  [API] PTY=${ptyItem?.obsrValue ?? 'N/A'} for (${nx},${ny})`);
 
     // RN1: 1시간 강수량 (mm)
     const rn1Item = items.find(i => i.category === 'RN1');
     if (!rn1Item) {
-      console.log(`  [API] No RN1 category in response`);
+      ncstGridCache.grid.set(`${nx},${ny}`, 0);
       return 0;
     }
 
-    // "강수없음", 결측값(-999 등), 또는 숫자값
     const val = rn1Item.obsrValue;
-    if (val === '강수없음' || val === null || val === undefined) return 0;
+    if (val === '강수없음' || val === null || val === undefined) {
+      ncstGridCache.grid.set(`${nx},${ny}`, 0);
+      return 0;
+    }
     const rainfall = parseFloat(val) || 0;
-    if (rainfall < 0) return 0; // 결측값 (-999, -998.9 등) 필터
-
-    console.log(`  [API] PTY=${ptyItem?.obsrValue ?? 'N/A'}, RN1=${rainfall}mm for (${nx},${ny})`);
-    return +rainfall.toFixed(1);
+    if (rainfall < 0) {
+      ncstGridCache.grid.set(`${nx},${ny}`, 0);
+      return 0;
+    }
+    if (rainfall > 0) {
+      console.log(`  [API] RN1=${rainfall}mm (${nx},${ny})`);
+    }
+    const result = +rainfall.toFixed(1);
+    ncstGridCache.grid.set(`${nx},${ny}`, result);
+    return result;
   } catch (err) {
     if (err.response?.status === 429) {
       publicApiQuotaExceeded = true;
@@ -282,6 +301,57 @@ export async function getAWSRealtime15min(stnId, lat, lon) {
     }
     console.error(`  [API] Ultra short ncst error:`, err.message);
     return 0;
+  }
+}
+
+// 초단기실황 조회 - 현재 1시간 슬라이딩 누적 강수량 (RN1) 반환
+// getRN1ForGrid 사용 (격자별 캐시로 배치 최적화)
+export async function getAWSRealtime15min(stnId, lat, lon) {
+  if (isMockMode()) return generateMockRealtime();
+  const { nx, ny } = convertToGrid(lat, lon);
+  return getRN1ForGrid(nx, ny);
+}
+
+/** 디버그: 공공 API 초단기실황 원시 응답 (격자 nx,ny 기준) */
+export async function getNcstDebug(lat = 36.48, lon = 127.259) {
+  const { nx, ny } = convertToGrid(lat, lon);
+  const { baseDate, baseTime } = getUltraSrtNcstBaseTime();
+  const data = await callKmaApi('getUltraSrtNcst', {
+    numOfRows: 10, pageNo: 1, dataType: 'JSON',
+    base_date: baseDate, base_time: baseTime, nx, ny,
+  });
+  const items = data?.response?.body?.items?.item;
+  const raw = Array.isArray(items) ? items : (items ? [items] : []);
+  const rn1Item = raw.find(i => i.category === 'RN1');
+  return {
+    baseDate, baseTime, nx, ny, lat, lon,
+    items: raw.map(i => ({ category: i.category, obsrValue: i.obsrValue })),
+    rn1: rn1Item ? rn1Item.obsrValue : null,
+  };
+}
+
+/** 디버그: APIHUB nph-aws2_min 원시 응답 + 파싱 결과 */
+export async function fetchAwsDebug() {
+  const apihubKey = getApihubKey();
+  if (!apihubKey || apihubKey.startsWith('여기에')) return { error: 'KMA_APIHUB_KEY 미설정' };
+  const tm = getAws1mBaseTime();
+  try {
+    const res = await axios.get(`${getKmaApihubBaseUrl()}/nph-aws2_min`, {
+      params: { tm2: tm, stn: 0, help: 1, authKey: apihubKey },
+      timeout: 30000,
+      responseType: 'text',
+      headers: workerHeaders(),
+    });
+    const parsed = parseAwsTextWithDebug(res.data);
+    const headerLines = (res.data || '').split('\n').filter(l => l.startsWith('#')).slice(0, 5);
+    return {
+      tm,
+      headerLines,
+      parsed: parsed?.debug ?? null,
+      sampleWithRain: parsed?.debug?.sampleRows?.filter(r => (r.rn15 || 0) > 0 || (r.rn60 || 0) > 0) ?? [],
+    };
+  } catch (e) {
+    return { error: e.message };
   }
 }
 
@@ -352,9 +422,67 @@ export async function getForecast45min(nx, ny) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// AWS 전국 10분 관측 캐시 - apihub.kma.go.kr/nph-aws1_10m
-// 날씨누리 "강수15(과거 15분간 강수량)"의 실제 데이터 소스
-// 한 폴링 사이클에서 전국 1회 fetch → 관측소별 RN_15M 캐시
+// 공공데이터 Aws1miInfoService — 1회 호출로 전국 AWS 15분/60분 강수량
+// APIHUB 파싱 오류 회피, 관측소별 실측치 직접 제공
+// ─────────────────────────────────────────────────────────────
+
+/** 공공데이터 Aws1miInfoService getAws1miList — 1회 호출로 전국 관측소 강수량 */
+export async function fetchAws1miFromPublicApi() {
+  if (isMockMode()) return null;
+
+  const apiKey = getApiKey();
+  if (!apiKey || apiKey.startsWith('your_')) return null;
+
+  const awsDt = getAws1mBaseTime();
+  try {
+    const url = `${getKmaAws1miBaseUrl()}/getAws1miList`;
+    const res = await axios.get(url, {
+      params: {
+        serviceKey: apiKey,
+        pageNo: 1,
+        numOfRows: 1000,
+        dataType: 'JSON',
+        awsDt,
+        awsId: 0,
+      },
+      timeout: 20000,
+      headers: workerHeaders(),
+    });
+
+    const items = res.data?.response?.body?.items?.item;
+    if (!items) return null;
+
+    const raw = Array.isArray(items) ? items : [items];
+    const stations = new Map();
+
+    for (const row of raw) {
+      const stnId = String(row.stnId ?? row.awsId ?? row.STN ?? '').trim();
+      if (!stnId || !/^\d+$/.test(stnId)) continue;
+
+      const rn15 = parseFloat(row.rn15 ?? row.rn_15m ?? row.RN15 ?? row.RN_15M ?? 0) || 0;
+      const rn60 = parseFloat(row.rn60 ?? row.rn_60m ?? row.RN60 ?? row.RN_60M ?? 0) || 0;
+      if (rn15 < 0 || rn60 < 0) continue;
+
+      stations.set(stnId, {
+        rn15: +(rn15.toFixed(1)),
+        rn60: +(rn60.toFixed(1)),
+        lat: null,
+        lon: null,
+        name: row.stnNm ?? row.stnName ?? `관측소${stnId}`,
+      });
+    }
+
+    if (stations.size === 0) return null;
+    console.log(`  [AWS] 공공 Aws1mi: ${stations.size}개, RN15>0 ${[...stations.values()].filter(s => s.rn15 > 0).length}개`);
+    return stations;
+  } catch (err) {
+    console.warn('  [AWS] 공공 Aws1mi 오류:', err.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// AWS 전국 10분 관측 캐시 - apihub.kma.go.kr/nph-aws2_min (폴백)
 // ─────────────────────────────────────────────────────────────
 
 let awsDataCache = null;  // { tm, stations: Map<stnId, {rn15, lat, lon}>, hasCoords }
@@ -419,8 +547,14 @@ function getAws1mBaseTime() {
 // 날씨누리 "강수15" = RN_15M 컬럼 (15분 강수량, mm)
 // 컬럼명이 버전에 따라 다를 수 있으므로 패턴 매칭으로 자동 감지
 function parseAwsText(text) {
+  const result = parseAwsTextWithDebug(text);
+  return result?.stations ?? null;
+}
+
+function parseAwsTextWithDebug(text) {
   const lines = text.split('\n');
   let colStn = -1, colRn15 = -1, colRn60 = -1, colLat = -1, colLon = -1, colName = -1;
+  let headerLine = '';
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -432,12 +566,11 @@ function parseAwsText(text) {
     const stnIdx = tokens.indexOf('STN');
     if (stnIdx < 0) continue;
 
+    headerLine = trimmed;
     tokens.forEach((t, i) => {
       if (t === 'STN' || t === 'ID') colStn = i;
-      // 15분 강수량: RN_15M, RN15M, RN15, R15M, 15M 등 패턴
-      else if (/^RN[-_]?15/.test(t) || /^R_?15M?$/.test(t) || t === '15M') colRn15 = i;
-      // 1시간 강수량: RN_60M, RN60M, RN60, R60M, 60M 등 패턴
-      else if (/^RN[-_]?60/.test(t) || /^R_?60M?$/.test(t) || t === '60M' || t === 'RN1') colRn60 = i;
+      else if (/^RN[-_]?15/.test(t) || /^R_?15M?$/.test(t) || t === '15M' || /^15M$/i.test(t)) colRn15 = i;
+      else if (/^RN[-_]?60/.test(t) || /^R_?60M?$/.test(t) || t === '60M' || /^60M$/i.test(t) || t === 'RN1') colRn60 = i;
       else if (t === 'LAT') colLat = i;
       else if (t === 'LON' || t === 'LNG') colLon = i;
       else if (t === 'STN_NM' || t === 'STN_NAME' || t === 'NAME' || t === 'NM') colName = i;
@@ -449,6 +582,7 @@ function parseAwsText(text) {
   if (colStn < 0) return null;
 
   const stations = new Map();
+  const sampleRows = [];
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
@@ -463,16 +597,26 @@ function parseAwsText(text) {
     const lon = colLon >= 0 ? parseFloat(parts[colLon]) : NaN;
     const name = colName >= 0 && parts[colName] ? String(parts[colName]).trim() : null;
 
-    stations.set(rawStn, {
-      rn15: (!isNaN(rn15Raw) && rn15Raw >= 0) ? +rn15Raw.toFixed(1) : null,
-      rn60: (!isNaN(rn60Raw) && rn60Raw >= 0) ? +rn60Raw.toFixed(1) : null,
-      lat: isNaN(lat) ? null : lat,
-      lon: isNaN(lon) ? null : lon,
-      name: name || `관측소${rawStn}`,
-    });
+    const rn15 = (!isNaN(rn15Raw) && rn15Raw >= 0) ? +rn15Raw.toFixed(1) : null;
+    const rn60 = (!isNaN(rn60Raw) && rn60Raw >= 0) ? +rn60Raw.toFixed(1) : null;
+    stations.set(rawStn, { rn15, rn60, lat: isNaN(lat) ? null : lat, lon: isNaN(lon) ? null : lon, name: name || `관측소${rawStn}` });
+
+    if (sampleRows.length < 5 || (rn15 > 0 || rn60 > 0)) {
+      sampleRows.push({ stn: rawStn, name: name || rawStn, rn15, rn60, rawRn15: colRn15 >= 0 ? parts[colRn15] : 'N/A', rawRn60: colRn60 >= 0 ? parts[colRn60] : 'N/A' });
+    }
   }
 
-  return stations;
+  return {
+    stations,
+    debug: {
+      headerLine,
+      colIndices: { colStn, colRn15, colRn60, colLat, colLon, colName },
+      sampleRows: sampleRows.slice(0, 10),
+      totalStations: stations.size,
+      rn15NonZero: [...stations.values()].filter(s => s.rn15 > 0).length,
+      rn60NonZero: [...stations.values()].filter(s => s.rn60 > 0).length,
+    },
+  };
 }
 
 /**
@@ -495,24 +639,31 @@ export async function fetchAllAwsData() {
       console.log(`  [AWS] nph-aws2_min: tm=${tm} (전국 fetch, 시도 ${attempt}/2)`);
 
       const res = await axios.get(`${getKmaApihubBaseUrl()}/nph-aws2_min`, {
-        params: { tm, stn: 0, help: 0, authKey: apihubKey },
+        params: { tm2: tm, stn: 0, help: 1, disp: 0, authKey: apihubKey },
         timeout: 60000,
         responseType: 'text',
         headers: workerHeaders(),
       });
 
-      const stations = parseAwsText(res.data);
+      const parsed = parseAwsTextWithDebug(res.data);
+      const stations = parsed?.stations ?? null;
       if (!stations || stations.size === 0) {
-        console.warn('  [AWS] 파싱 실패 또는 빈 응답 (컬럼명 확인 필요)');
+        const rawLines = (res.data || '').split('\n').slice(0, 15).join('\n');
+        console.warn('  [AWS] 파싱 실패 또는 빈 응답. raw 헤더:', rawLines.substring(0, 500));
         if (attempt < 2) { await new Promise(r => setTimeout(r, 5000)); continue; }
         return;
       }
 
-      const rn15Count = [...stations.values()].filter(s => s.rn15 !== null).length;
-      const rn60Count = [...stations.values()].filter(s => s.rn60 !== null).length;
+      const rn15Count = [...stations.values()].filter(s => s.rn15 !== null && s.rn15 > 0).length;
+      const rn60Count = [...stations.values()].filter(s => s.rn60 !== null && s.rn60 > 0).length;
       const hasCoords = [...stations.values()].some(s => s.lat !== null);
       awsDataCache = { tm, stations, hasCoords };
-      console.log(`  [AWS] 로드 완료: ${stations.size}개, RN15 ${rn15Count}개, RN60 ${rn60Count}개, 좌표 ${hasCoords ? '있음' : '없음'}`);
+      console.log(`  [AWS] 로드 완료: ${stations.size}개, RN15>0 ${rn15Count}개, RN60>0 ${rn60Count}개, 좌표 ${hasCoords ? '있음' : '없음'}`);
+      if (parsed.debug && (rn15Count === 0 && rn60Count === 0)) {
+        console.log('  [AWS-DEBUG] 전 관측소 0mm. 헤더:', parsed.debug.headerLine?.substring(0, 200));
+        console.log('  [AWS-DEBUG] 컬럼인덱스:', JSON.stringify(parsed.debug.colIndices));
+        console.log('  [AWS-DEBUG] 샘플:', JSON.stringify(parsed.debug.sampleRows?.slice(0, 5)));
+      }
 
       // nph-aws2_min에 좌표 없으면 nph-aws2_stn으로 보완 (1회만 fetch)
       if (!hasCoords) await fetchAwsStnCoords();
@@ -528,6 +679,58 @@ export async function fetchAllAwsData() {
   }
 }
 
+/** typ02 getAwsStnLstTbl 디버그: 활용신청 완료 여부 확인 */
+export async function fetchTyp02AwsStnLstTblDebug() {
+  const apihubKey = getApihubKey();
+  if (!apihubKey || apihubKey.startsWith('여기에')) {
+    return { ok: false, error: 'KMA_APIHUB_KEY 미설정' };
+  }
+  const w = getWorkerUrl();
+  const typ02Base = w ? `${w}/kma-apihub-typ02` : 'https://apihub.kma.go.kr/api/typ02/openApi/AwsYearlyInfoService';
+  const url = `${typ02Base}/getAwsStnLstTbl?pageNo=1&numOfRows=1000&dataType=JSON&year=2024&month=03&authKey=${encodeURIComponent(apihubKey)}`;
+  try {
+    const res = await axios.get(url, { timeout: 15000, headers: workerHeaders() });
+    const items = res.data?.response?.body?.items?.item;
+    const count = Array.isArray(items) ? items.length : (items ? 1 : 0);
+    return { ok: true, count, sample: Array.isArray(items) ? items.slice(0, 2) : (items ? [items] : []) };
+  } catch (e) {
+    const status = e.response?.status;
+    const msg = e.response?.data?.message ?? e.message;
+    return { ok: false, error: msg, status: status ?? 'network_error' };
+  }
+}
+
+/** nph-aws2_stn 디버그: 좌표 제공 개수 확인 (캐시 무시, 신규 fetch) */
+export async function fetchAwsStnCoordsDebug() {
+  const apihubKey = getApihubKey();
+  if (!apihubKey || apihubKey.startsWith('여기에')) {
+    return { error: 'KMA_APIHUB_KEY 미설정' };
+  }
+  try {
+    const res = await axios.get(`${getKmaApihubBaseUrl()}/nph-aws2_stn`, {
+      params: { authKey: apihubKey, help: 1 },
+      timeout: 30000,
+      responseType: 'text',
+      headers: workerHeaders(),
+    });
+    const parsed = parseAwsTextWithDebug(res.data);
+    if (!parsed?.stations) {
+      return { error: '파싱 실패', rawLines: (res.data || '').split('\n').slice(0, 20) };
+    }
+    const { stations } = parsed;
+    const withCoords = [...stations.values()].filter(s => s.lat != null && s.lon != null);
+    return {
+      totalStations: stations.size,
+      withCoords: withCoords.length,
+      colIndices: parsed.debug?.colIndices ?? null,
+      headerLine: parsed.debug?.headerLine ?? null,
+      sampleWithCoords: withCoords.slice(0, 5).map(s => ({ stn: s.name || '?', lat: s.lat, lon: s.lon })),
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
 /** AWS 캐시 성공 여부 (processStations 폴백 결정에 사용) */
 export function isAwsCacheAvailable() {
   return awsDataCache !== null && awsDataCache.stations != null && awsDataCache.stations.size > 0;
@@ -536,18 +739,25 @@ export function isAwsCacheAvailable() {
 /** AWS 관측소 목록 (캐시 성공 시): { stn_id, name, lat, lon, rn15, rn60 }[] */
 export function getAwsStationsWithRainfall() {
   if (!awsDataCache || !awsDataCache.stations) return [];
-  const { stations, hasCoords } = awsDataCache;
+  const { stations } = awsDataCache;
+  const fallback = getAwsStationsForFallback();
+  const fallbackMap = new Map(fallback.map(s => [String(s.stn_id), s]));
+
   const list = [];
   for (const [stnId, entry] of stations) {
-    let lat = entry.lat, lon = entry.lon;
+    let lat = entry.lat, lon = entry.lon, name = entry.name || `관측소${stnId}`;
     if ((lat === null || lon === null) && awsStnCoords) {
       const c = awsStnCoords.get(stnId);
       if (c) { lat = c.lat; lon = c.lon; }
     }
-    if (lat === null || lon === null) continue; // 좌표 없으면 폴백 불가
+    if ((lat === null || lon === null) && fallbackMap.has(stnId)) {
+      const fb = fallbackMap.get(stnId);
+      lat = fb.lat; lon = fb.lon; name = fb.name || name;
+    }
+    if (lat === null || lon === null) continue;
     list.push({
       stn_id: stnId,
-      name: entry.name || `관측소${stnId}`,
+      name,
       lat, lon,
       rn15: entry.rn15,
       rn60: entry.rn60,
@@ -735,7 +945,10 @@ export async function getVsrtForecastHourly(nx, ny) {
   // 캐시 히트: 같은 발표시각이면 전국 격자 재사용
   if (vsrtGridCache && vsrtGridCache.tmfc === tmfc && vsrtGridCache.tmef === tmef) {
     const val = vsrtGridCache.grid.get(gridKey);
-    if (!val) return 0;
+    if (!val) {
+      console.warn(`  [API] VSRT cache miss (${nx},${ny}) → fallback to getUltraSrtFcst`);
+      return getForecast45min(nx, ny);
+    }
     // PTY=0 필터 제거: PTY 무관하게 RN1 예보값을 그대로 반환
     return +val.rn1.toFixed(1);
   }
@@ -752,14 +965,19 @@ export async function getVsrtForecastHourly(nx, ny) {
     });
 
     const grid = parseVsrtGridText(res.data);
+    // 빈 grid(파싱 실패/API 형식 변경) 시 캐시하지 않고 공공 API 폴백
+    if (grid.size === 0) {
+      console.warn(`  [API] VSRT grid empty (parse failed) → fallback to getUltraSrtFcst`);
+      return getForecast45min(nx, ny);
+    }
     vsrtGridCache = { tmfc, tmef, grid };
 
     console.log(`  [API] VSRT grid loaded: ${grid.size} points`);
 
     const val = grid.get(gridKey);
     if (!val) {
-      console.warn(`  [API] VSRT (${nx},${ny}) not found in grid`);
-      return 0;
+      console.warn(`  [API] VSRT (${nx},${ny}) not found in grid → fallback to getUltraSrtFcst`);
+      return getForecast45min(nx, ny);
     }
     // PTY=0 필터 제거: PTY 무관하게 RN1 예보값을 그대로 반환
     console.log(`  [API] VSRT PTY=${val.pty}, RN1=${val.rn1}mm for (${nx},${ny})`);

@@ -227,10 +227,12 @@ export async function updateAlertState() {
 // ─── 2단계 폴링용 관측소 쿼리 함수 ────────────────────────────────────────
 
 const ALL_STATIONS_SQL = `
-  SELECT ws.*, e.code as emd_code, e.name as emd_name, e.district_id, d.metro_id
+  SELECT ws.*, e.code as emd_code, e.name as emd_name, e.district_id,
+         d.metro_id, d.name as district_name, m.name as metro_name
   FROM weather_stations ws
   JOIN emds e ON ws.emd_id = e.id
   JOIN districts d ON e.district_id = d.id
+  JOIN metros m ON d.metro_id = m.id
 `;
 
 /**

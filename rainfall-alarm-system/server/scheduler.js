@@ -96,7 +96,8 @@ async function runAwsRefresh() {
       const fallback = getAwsStationsForFallback();
       const priority = fallback.filter(s => FALLBACK_PRIORITY_STN_IDS.includes(String(s.stn_id)));
       const rest = fallback.filter(s => !FALLBACK_PRIORITY_STN_IDS.includes(String(s.stn_id)));
-      const toProcess = [...priority, ...rest].slice(0, 80); // 35→80: 전국 1시간 예측치 표시 커버리지 확대
+      const fallbackMax = parseInt(process.env.AWS_FALLBACK_MAX || '80', 10);
+      const toProcess = [...priority, ...rest].slice(0, fallbackMax); // 700+ 확대 시 AWS_FALLBACK_MAX=731
       if (toProcess.length > 0) {
         console.log(`  [AWS10m] APIHUB 없음 → 공공 API 폴백 ${toProcess.length}개 관측소`);
         for (let i = 0; i < toProcess.length; i++) {
@@ -135,7 +136,10 @@ async function runAwsRefresh() {
       // APIHUB 파싱은 성공했으나 RN 컬럼 미발견(전부 null) → 공공 API 폴백
       if (updated === 0 && stations.length > 0) {
         const fallback = getAwsStationsForFallback();
-        const toProcess = fallback.slice(0, 80); // 35→80: 전국 1시간 예측치 표시 커버리지 확대
+        const priority = fallback.filter(s => FALLBACK_PRIORITY_STN_IDS.includes(String(s.stn_id)));
+        const rest = fallback.filter(s => !FALLBACK_PRIORITY_STN_IDS.includes(String(s.stn_id)));
+        const fallbackMax = parseInt(process.env.AWS_FALLBACK_MAX || '80', 10);
+        const toProcess = [...priority, ...rest].slice(0, fallbackMax);
         if (toProcess.length > 0) {
           console.log(`  [AWS10m] APIHUB RN컬럼 없음 → 공공 API 폴백 ${toProcess.length}개`);
           for (let i = 0; i < toProcess.length; i++) {
