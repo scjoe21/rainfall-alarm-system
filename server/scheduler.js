@@ -1,7 +1,7 @@
 import { getDatabase } from './config/database.js';
 import { checkAlarmCondition, clearForecastCache } from './services/alarmService.js';
 import { emitAlarm, emitAlarmCounts, emitAlertState } from './websocket.js';
-import { convertToGrid, getAWSRealtime15min, clearVsrtGridCache, clearAWSGridCache } from './services/kmaAPI.js';
+import { convertToGrid, getAWSRealtime15min, clearAWSGridCache } from './services/kmaAPI.js';
 import {
   updateAlertState,
   getStationsToPoll,
@@ -126,7 +126,8 @@ export async function runRainfallCheck() {
     }
 
     clearForecastCache();
-    clearVsrtGridCache();  // VSRT 예보 캐시 초기화
+    // clearVsrtGridCache 제거: 주기마다 비우면 예보 API가 격자 수만큼 반복 호출되어
+    // 일일 한도 초과 위험. kmaAPI 예보 캐시는 baseKey 변경 시 자동 갱신.
     clearAWSGridCache();   // AWS 실측 캐시 초기화 (폴링 사이클마다 최신 15분 강수량 fetch)
 
     // 1단계: 격자좌표별 그룹핑

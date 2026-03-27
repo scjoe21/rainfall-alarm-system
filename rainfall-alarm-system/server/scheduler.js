@@ -13,7 +13,6 @@ import {
   convertToGrid,
   getAWSRealtime15min,
   getVsrtForecastHourly,
-  clearVsrtGridCache,
   clearAwsCache,
   clearNcstGridCache,
   fetchAllAwsData,
@@ -259,7 +258,9 @@ function chunk(arr, n) {
 // ─── AWS 관측소 기준 폴링 (관측소 이름 기준 알람) ───────────────────────────
 async function processAwsStations(label) {
   clearForecastCache();
-  clearVsrtGridCache();
+  // clearVsrtGridCache 호출 안 함: 매 Fast/Slow 주기마다 비우면 격자마다 getUltraSrtFcst를
+  // 반복 호출해 일일 한도·429에 걸림(전국 호우 시 예측만 죽는 현상). kmaAPI 캐시는
+  // forecast 발표 baseKey 기준으로 자동 무효화됨.
   clearAwsCache();
   await fetchAllAwsData();
 
