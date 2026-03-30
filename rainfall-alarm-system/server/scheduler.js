@@ -13,6 +13,8 @@ import {
   convertToGrid,
   getAWSRealtime15min,
   getVsrtForecastHourly,
+  prefetchVsrtForecastGrid,
+  clearVsrtGridCache,
   clearAwsCache,
   clearNcstGridCache,
   fetchAllAwsData,
@@ -77,6 +79,7 @@ async function runAwsRefresh() {
   try {
     await fetchAllAwsData();
     clearNcstGridCache(); // 공공 API 격자 캐시 초기화
+    await prefetchVsrtForecastGrid(); // API허브 VSRT 전국 격자 1회 → 1시간 예측 공공 API 폭주 방지
 
     let stations = getAwsStationsWithRainfall();
     const db = await getDatabase();
@@ -258,11 +261,10 @@ function chunk(arr, n) {
 // ─── AWS 관측소 기준 폴링 (관측소 이름 기준 알람) ───────────────────────────
 async function processAwsStations(label) {
   clearForecastCache();
-  // clearVsrtGridCache 호출 안 함: 매 Fast/Slow 주기마다 비우면 격자마다 getUltraSrtFcst를
-  // 반복 호출해 일일 한도·429에 걸림(전국 호우 시 예측만 죽는 현상). kmaAPI 캐시는
-  // forecast 발표 baseKey 기준으로 자동 무효화됨.
+  clearVsrtGridCache();
   clearAwsCache();
   await fetchAllAwsData();
+  await prefetchVsrtForecastGrid();
 
   const stations = isAwsCacheAvailable()
     ? getAwsStationsWithRainfall()

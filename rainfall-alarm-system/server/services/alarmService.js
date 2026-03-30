@@ -315,7 +315,7 @@ export async function getLatestRainfallByDistrict(districtId) {
       e.name as emd_name,
       ws.name as station_name,
       COALESCE(rr.rainfall_15min, 0) AS realtime_15min,
-      rr.rainfall_1hour AS realtime_1hour,
+      COALESCE(rr.rainfall_1hour, 0) AS realtime_1hour,
       COALESCE(rf.rainfall_forecast, 0) AS forecast_hourly
     FROM emds e
     LEFT JOIN weather_stations ws ON ws.emd_id = e.id

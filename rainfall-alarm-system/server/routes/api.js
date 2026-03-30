@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { getDatabase } from '../config/database.js';
 import alarmService from '../services/alarmService.js';
 import { getCurrentAlertState } from '../services/weatherAlertService.js';
-import { getApiUsage, isAwsCacheAvailable } from '../services/kmaAPI.js';
+import { getApiUsage, isAwsCacheAvailable, isPublicApiQuotaExceeded, getPublicApi429RetryAfterMs } from '../services/kmaAPI.js';
 import { emitAlarm } from '../websocket.js';
 import fs from 'fs';
 import path from 'path';
@@ -40,14 +40,16 @@ router.get('/status', async (req, res) => {
     }
   }
 
-  // 1시간 예측치 API 테스트 (서울 격자, ?test=2)
+  // 1시간 예측치 API 테스트 (서울 격자, ?test=2 | 남부 부산 격자, ?test=2&region=south)
   let forecastTest = null;
   if (req.query.test === '2') {
     try {
       const { convertToGrid, getVsrtForecastHourly } = await import('../services/kmaAPI.js');
-      const { nx, ny } = convertToGrid(37.571, 126.966);
+      const lat = req.query.region === 'south' ? 35.18 : 37.571;
+      const lon = req.query.region === 'south' ? 129.08 : 126.966;
+      const { nx, ny } = convertToGrid(lat, lon);
       const forecast = await getVsrtForecastHourly(nx, ny);
-      forecastTest = { ok: true, nx, ny, forecast_hourly: forecast, message: '1시간 예측치 조회 성공' };
+      forecastTest = { ok: true, region: req.query.region || 'seoul', lat, lon, nx, ny, forecast_hourly: forecast, message: '1시간 예측치 조회 성공' };
     } catch (e) {
       forecastTest = { ok: false, error: e.message, message: '1시간 예측치 API 실패' };
     }
@@ -66,12 +68,17 @@ router.get('/status', async (req, res) => {
       rainfall_realtime_1h: rrCount,
       weather_stations: wsCount,
       aws_cache_available: isAwsCacheAvailable(),
+      /** 429 수신 후 쿨다운 중이면 true (자정까지 고정 차단 아님) */
+      public_api_quota_exceeded: isPublicApiQuotaExceeded(),
+      public_api_retry_after_sec: Math.ceil(getPublicApi429RetryAfterMs() / 1000),
     },
     apiTest,
     forecastTest,
     hint: !hasWorkerUrl
       ? 'CLOUDFLARE_WORKER_URL을 설정하여 기상청 API 프록시(한국 PoP 경유)를 사용하세요. worker/ 폴더에서 wrangler deploy 후 URL을 설정합니다.'
-      : null,
+      : isPublicApiQuotaExceeded()
+        ? `공공 API 429 대기 중(약 ${Math.ceil(getPublicApi429RetryAfterMs() / 1000)}초 후 재시도). 이 동안 1시간 예측치는 0에 가깝게 나올 수 있음. KMA_429_COOLDOWN_MS로 대기 시간 조정. 일일 한도는 KMA_DAILY_LIMIT·공공데이터포털 신청 증액으로 완화.`
+        : null,
   });
 });
 
@@ -315,6 +322,76 @@ router.get('/debug/ncst-raw', async (req, res) => {
     const lon = parseFloat(req.query.lon) || 127.259;
     const result = await getNcstDebug(lat, lon);
     res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 디버그: 강우량 데이터 파이프라인 검증 (실측치/예측치 미표시 원인 파악)
+router.get('/debug/rainfall-pipeline', async (req, res) => {
+  try {
+    const db = await getDatabase();
+    const districtId = parseInt(req.query.districtId) || 801;
+
+    // 1. SQLite 현재 시각 (UTC)
+    const nowRow = db.prepare("SELECT datetime('now') as utc_now, datetime('now', '-60 minutes') as cutoff").get();
+
+    // 2. aws_rainfall 최근 샘플 (좌표 있는지 확인)
+    const awsSample = db.prepare(`
+      SELECT stn_id, name, lat, lon, rainfall_15min, rainfall_1hour, forecast_hourly, updated_at
+      FROM aws_rainfall
+      WHERE updated_at >= datetime('now', '-60 minutes')
+      ORDER BY updated_at DESC
+      LIMIT 5
+    `).all();
+
+    // 3. rainfall_realtime 최근 샘플 (station_id와 매칭)
+    const rrSample = db.prepare(`
+      SELECT rr.id, rr.station_id, rr.rainfall_15min, rr.rainfall_1hour, rr.timestamp, ws.name as ws_name
+      FROM rainfall_realtime rr
+      LEFT JOIN weather_stations ws ON ws.id = rr.station_id
+      WHERE rr.timestamp >= datetime('now', '-60 minutes')
+      ORDER BY rr.timestamp DESC
+      LIMIT 5
+    `).all();
+
+    // 4. 해당 district의 emd별 조회 결과 (getLatestRainfallByDistrict와 동일 쿼리)
+    const districtResult = db.prepare(`
+      SELECT
+        e.code as emd_code,
+        e.name as emd_name,
+        ws.id as ws_id,
+        ws.name as station_name,
+        rr.id as rr_id,
+        rr.rainfall_15min,
+        rr.rainfall_1hour,
+        rr.timestamp as rr_timestamp,
+        rf.rainfall_forecast,
+        rf.base_time as rf_base_time
+      FROM emds e
+      LEFT JOIN weather_stations ws ON ws.emd_id = e.id
+      LEFT JOIN rainfall_realtime rr ON rr.station_id = ws.id
+        AND rr.id = (
+          SELECT MAX(id) FROM rainfall_realtime
+          WHERE station_id = ws.id
+            AND timestamp >= datetime('now', '-60 minutes')
+        )
+      LEFT JOIN rainfall_forecast rf ON rf.station_id = ws.id
+        AND rf.id = (
+          SELECT MAX(id) FROM rainfall_forecast
+          WHERE station_id = ws.id
+            AND base_time >= datetime('now', '-60 minutes')
+        )
+      WHERE e.district_id = ?
+    `).all(districtId);
+
+    res.json({
+      sqliteTime: nowRow,
+      awsSample,
+      rrSample,
+      districtResult,
+      hint: 'rr_id가 null이면 rainfall_realtime 매칭 실패. timestamp/base_time이 cutoff보다 이전이면 시간 조건 불일치.',
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

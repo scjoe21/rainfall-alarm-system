@@ -112,7 +112,7 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
           if (!item?.emd_code) return;
           map[item.emd_code] = {
             realtime_15min: item.realtime_15min ?? 0,
-            realtime_1hour: item.realtime_1hour ?? null,
+            realtime_1hour: item.realtime_1hour ?? 0,
             forecast_hourly: item.forecast_hourly ?? 0,
             station_name: item.station_name || null,
           };
@@ -120,7 +120,7 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
         if (geojson?.features?.length && Object.keys(map).length === 0) {
           geojson.features.forEach(f => {
             const cd = f.properties?.EMD_CD;
-            if (cd) map[cd] = { realtime_15min: 0, realtime_1hour: null, forecast_hourly: 0, station_name: null };
+            if (cd) map[cd] = { realtime_15min: 0, realtime_1hour: 0, forecast_hourly: 0, station_name: null };
           });
         }
         setRainfallData(map);
@@ -146,7 +146,7 @@ function EmdMap({ districtId, metroId, districtName, districtCode, isMetroMode }
         [update.emdCode]: {
           ...prev[update.emdCode],
           realtime_15min: update.realtime_15min ?? prev[update.emdCode]?.realtime_15min ?? 0,
-          realtime_1hour: update.realtime_1hour ?? prev[update.emdCode]?.realtime_1hour ?? null,
+          realtime_1hour: update.realtime_1hour ?? prev[update.emdCode]?.realtime_1hour ?? 0,
           forecast_hourly: update.forecast_hourly ?? prev[update.emdCode]?.forecast_hourly ?? 0,
           station_name: prev[update.emdCode]?.station_name ?? null,
         },
