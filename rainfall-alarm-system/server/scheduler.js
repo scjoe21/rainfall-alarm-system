@@ -14,7 +14,6 @@ import {
   getAWSRealtime15min,
   getVsrtForecastHourly,
   prefetchVsrtForecastGrid,
-  clearVsrtGridCache,
   clearAwsCache,
   clearNcstGridCache,
   fetchAllAwsData,
@@ -261,7 +260,9 @@ function chunk(arr, n) {
 // ─── AWS 관측소 기준 폴링 (관측소 이름 기준 알람) ───────────────────────────
 async function processAwsStations(label) {
   clearForecastCache();
-  clearVsrtGridCache();
+  // clearVsrtGridCache() 제거: prefetchVsrtForecastGrid() 내부의 tmfc/tmef 변경 감지 +
+  // VSRT_MIN_REFRESH_MS 체크가 이미 담당. 매 폴링마다 강제 삭제하면 8분 쿨다운을
+  // bypass하여 APIHUB 과호출 → VSRT 실패 → 공공 API 429 → forecast_hourly=0 반환.
   clearAwsCache();
   await fetchAllAwsData();
   await prefetchVsrtForecastGrid();

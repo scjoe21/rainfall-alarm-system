@@ -1059,6 +1059,8 @@ export async function getVsrtForecastHourly(nx, ny) {
   }
 
   if (Date.now() < publicApi429Until) {
+    const remainSec = Math.ceil((publicApi429Until - Date.now()) / 1000);
+    console.warn(`  [API] 공공 API 429 쿨다운 중(${remainSec}s) — (${nx},${ny}) forecast=0 반환`);
     return 0;
   }
 
