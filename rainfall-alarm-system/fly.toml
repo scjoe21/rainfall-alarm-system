@@ -13,6 +13,10 @@ primary_region = 'sin'
   PORT = '3000'
   DB_DIR = '/app/db'
   KMA_DAILY_LIMIT = '1000000'
+  # 공공 초단기예보 호출 최소 간격(ms). 500ms → 분당 최대 120회. 429 빈발 시 700~1000으로 증가
+  FORECAST_API_MIN_INTERVAL_MS = '500'
+  # VSRT API허브 전국 격자 사용 여부. 403 등 미승인 키이면 false로 설정
+  KMA_VSRT_ENABLED = 'false'
 
 [mounts]
   source = 'rainfall_data'

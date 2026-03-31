@@ -372,11 +372,22 @@ export async function fetchAwsDebug() {
   }
 }
 
-// 공공 초단기예보 격자 캐시 (VSRT 실패 시 606개 관측소 → 격자별 1회만 호출로 429 방지)
+// ─── 공공 초단기예보 격자 캐시 ────────────────────────────────────────────────
+// baseKey = baseDate_baseTime (매시 30분 기준, 약 1시간마다 변경)
+// 동일 baseKey 내에서 같은 (nx,ny)는 재호출 없이 캐시 값 재사용
 let forecast45minCache = null; // { baseKey, grid: Map<'nx,ny', number> }
+
+// 분당 호출 집중 → 429 방지용 마지막 공공 API 호출 타임스탬프
+let lastFcstApiCallMs = 0;
+// 실제 API 호출 사이 최소 간격 (FORECAST_API_MIN_INTERVAL_MS, 기본 500ms)
+function getFcstApiIntervalMs() {
+  const v = parseInt(process.env.FORECAST_API_MIN_INTERVAL_MS || '', 10);
+  return Number.isFinite(v) && v >= 0 ? v : 500;
+}
 
 export function clearForecast45minCache() {
   forecast45minCache = null;
+  lastFcstApiCallMs = 0;
 }
 
 // 초단기예보 조회 - 45분 후까지의 예측 강수량 (RN1)
@@ -389,12 +400,25 @@ export async function getForecast45min(nx, ny) {
   const baseKey = `${baseDate}_${baseTime}`;
   const gridKey = `${nx},${ny}`;
 
-  if (forecast45minCache && forecast45minCache.baseKey === baseKey) {
-    const cached = forecast45minCache.grid.get(gridKey);
-    if (cached !== undefined) return cached;
-  } else {
+  // baseKey가 바뀌면 새 캐시 생성, 유지되면 기존 재사용
+  if (!forecast45minCache || forecast45minCache.baseKey !== baseKey) {
     forecast45minCache = { baseKey, grid: new Map() };
+    lastFcstApiCallMs = 0; // 새 발표 시각이면 인터벌 리셋
   }
+
+  // 캐시 히트: 같은 baseKey 내 이미 조회된 격자이면 즉시 반환
+  const cached = forecast45minCache.grid.get(gridKey);
+  if (cached !== undefined) return cached;
+
+  // 분당 호출 수 제한: 직전 API 호출과 최소 간격을 둬서 KMA rate limit(429) 방지
+  const interval = getFcstApiIntervalMs();
+  if (interval > 0) {
+    const elapsed = Date.now() - lastFcstApiCallMs;
+    if (elapsed < interval) {
+      await new Promise(r => setTimeout(r, interval - elapsed));
+    }
+  }
+  lastFcstApiCallMs = Date.now();
 
   try {
     console.log(`  [API] getUltraSrtFcst: base=${baseDate} ${baseTime}, nx=${nx}, ny=${ny}`);
@@ -420,7 +444,6 @@ export async function getForecast45min(nx, ny) {
     const rawItems = body.items.item || [];
     const items = Array.isArray(rawItems) ? rawItems : [rawItems];
 
-    // RN1·PTY 카테고리 분리
     const rnItems = items.filter(i => i.category === 'RN1');
     const ptyItems = items.filter(i => i.category === 'PTY');
 
@@ -430,16 +453,12 @@ export async function getForecast45min(nx, ny) {
       return 0;
     }
 
-    // ※ PTY=0 필터 제거: 예보 PTY가 0이어도 RN1 예보값 자체를 그대로 사용한다.
-    //   영동형 산지 강수 등 특보 미발효 상황에서도 RN1 예보값이 올바르게 제공된다.
     const firstRn1 = rnItems[0];
     const matchingPty = ptyItems.find(
       p => p.fcstDate === firstRn1.fcstDate && p.fcstTime === firstRn1.fcstTime
     );
     console.log(`  [API] Forecast PTY=${matchingPty?.fcstValue ?? 'N/A'} at ${firstRn1.fcstTime} for (${nx},${ny})`);
 
-    // 초단기예보는 1시간 단위 6시간까지 제공
-    // 45분 예측: 가장 가까운 1개 시간대의 RN1값 사용
     let total = 0;
     if (firstRn1) {
       const val = firstRn1.fcstValue;
@@ -454,7 +473,9 @@ export async function getForecast45min(nx, ny) {
     return result;
   } catch (err) {
     console.error(`  [API] Ultra short fcst error:`, err.message);
-    forecast45minCache.grid.set(gridKey, 0);
+    if (forecast45minCache) {
+      forecast45minCache.grid.set(gridKey, 0);
+    }
     return 0;
   }
 }
@@ -971,8 +992,10 @@ export async function prefetchVsrtForecastGrid() {
   const tmef = getVsrtEffectiveTime();
   const now = Date.now();
 
+  // ok 여부와 무관하게 VSRT_MIN_REFRESH_MS 이내면 재시도 금지
+  // (ok=true 조건만 두면 실패할 때마다 매 사이클 재시도 → 공공 API burst → 429)
   if (
-    vsrtGridCache?.ok &&
+    vsrtGridCache &&
     vsrtGridCache.tmfc === tmfc &&
     vsrtGridCache.tmef === tmef &&
     vsrtGridCache.fetchedAt &&
@@ -1027,7 +1050,9 @@ export async function prefetchVsrtForecastGrid() {
 }
 
 export function clearVsrtGridCache() {
-  forecast45minCache = null;
+  // forecast45minCache는 여기서 초기화하지 않음:
+  // baseKey(매시 30분 단위) 변경 시 getForecast45min() 내부에서 자연 만료됨.
+  // 강제 초기화하면 매 폴링마다 수백 회 공공 API 호출 burst → 429 유발.
   vsrtGridCache = null;
   vsrtPrefetchInflight = null;
 }
