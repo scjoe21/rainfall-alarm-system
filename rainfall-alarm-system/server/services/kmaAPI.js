@@ -382,7 +382,7 @@ let lastFcstApiCallMs = 0;
 // 실제 API 호출 사이 최소 간격 (FORECAST_API_MIN_INTERVAL_MS, 기본 500ms)
 function getFcstApiIntervalMs() {
   const v = parseInt(process.env.FORECAST_API_MIN_INTERVAL_MS || '', 10);
-  return Number.isFinite(v) && v >= 0 ? v : 500;
+  return Number.isFinite(v) && v >= 0 ? v : 1000;
 }
 
 export function clearForecast45minCache() {

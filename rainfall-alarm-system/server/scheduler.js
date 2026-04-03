@@ -127,10 +127,12 @@ async function runAwsRefresh() {
         const rn15 = s.rn15 ?? getAwsRn15FromCache(s.stn_id, s.lat, s.lon);
         const rn60 = s.rn60 ?? null;
         const { nx, ny } = convertToGrid(s.lat, s.lon);
-        const forecastHourly = await getVsrtForecastHourly(nx, ny);
-        // rn15/rn60 둘 다 null이어도 저장 → 1시간 예측치 전국 표시를 위해 aws_rainfall에 포함
         const rn15Val = (rn15 !== null && rn15 !== undefined) ? rn15 : 0;
         const rn60Val = (rn60 !== null && rn60 !== undefined) ? rn60 : null;
+        // 강수가 있는 관측소만 예측 API 호출: 비 없는 606개 전체 호출 → KMA 분당 한도 초과 방지
+        // forecast45minCache가 동일 baseKey 내 중복 격자를 캐시하므로 실제 호출 수는 고유 격자 수
+        const hasRain = rn15Val > 0 || (rn60Val !== null && rn60Val > 0);
+        const forecastHourly = hasRain ? await getVsrtForecastHourly(nx, ny) : 0;
         saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, rn15Val, forecastHourly, rn60Val);
         updated++;
       }
