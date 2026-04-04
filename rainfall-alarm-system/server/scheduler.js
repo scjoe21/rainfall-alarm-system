@@ -7,6 +7,8 @@ import {
   logAwsAlarm,
   syncAwsToRainfallRealtime,
   saveAwsRainfall,
+  buildAwsToEmdMap,
+  findNearestEmd,
 } from './services/alarmService.js';
 import { emitAlarm, emitAlertState } from './websocket.js';
 import {
@@ -269,6 +271,9 @@ async function processAwsStations(label) {
   await fetchAllAwsData();
   await prefetchVsrtForecastGrid();
 
+  // AWS 관측소 → emd/district/metro 매핑 (1회 로드, 알람 emit 시 사용)
+  const emdMap = await buildAwsToEmdMap();
+
   const stations = isAwsCacheAvailable()
     ? getAwsStationsWithRainfall()
     : getAwsStationsForFallback();
@@ -322,12 +327,16 @@ async function processAwsStations(label) {
       if (alarmResult.forecastCalled) forecastCalls++;
 
       if (alarmResult.alarm) {
+        const emdInfo = findNearestEmd(awsStation.lat, awsStation.lon, emdMap);
         const alarm = {
           stationName: awsStation.name,
           stn_id: awsStation.stn_id,
           realtime15min: alarmResult.realtime15min,
           forecastHourly: alarmResult.forecastHourly,
           timestamp: new Date().toISOString(),
+          metroId:    emdInfo?.metro_id    ?? null,
+          districtId: emdInfo?.district_id ?? null,
+          emdCode:    emdInfo?.emd_code    ?? null,
         };
         alarms.push(alarm);
         await logAwsAlarm(awsStation.stn_id, awsStation.name, alarmResult.realtime15min, alarmResult.forecastHourly);

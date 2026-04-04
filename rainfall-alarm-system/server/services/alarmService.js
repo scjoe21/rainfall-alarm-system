@@ -335,6 +335,29 @@ export async function getLatestRainfallByDistrict(districtId) {
   `).all(districtId);
 }
 
+export async function buildAwsToEmdMap() {
+  const db = await getDatabase();
+  return db.prepare(`
+    SELECT ws.lat, ws.lon,
+           e.code as emd_code, e.id as emd_id,
+           d.id as district_id, m.id as metro_id
+    FROM weather_stations ws
+    JOIN emds e ON ws.emd_id = e.id
+    JOIN districts d ON e.district_id = d.id
+    JOIN metros m ON d.metro_id = m.id
+    WHERE ws.lat IS NOT NULL AND ws.lon IS NOT NULL
+  `).all();
+}
+
+export function findNearestEmd(lat, lon, emdMap) {
+  let nearest = null, minDist = Infinity;
+  for (const row of emdMap) {
+    const d = (row.lat - lat) ** 2 + (row.lon - lon) ** 2;
+    if (d < minDist) { minDist = d; nearest = row; }
+  }
+  return nearest; // { emd_code, emd_id, district_id, metro_id }
+}
+
 export default {
   checkAlarmCondition,
   checkAlarmConditionForAwsStation,
@@ -349,4 +372,6 @@ export default {
   getAlarmsByDistrict,
   getAlarmCountsByMetro,
   getLatestRainfallByDistrict,
+  buildAwsToEmdMap,
+  findNearestEmd,
 };
