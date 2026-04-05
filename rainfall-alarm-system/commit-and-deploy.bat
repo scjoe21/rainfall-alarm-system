@@ -9,7 +9,7 @@ git add -A
 git status
 git diff --cached --quiet
 if errorlevel 1 (
-  git commit -m "fix(forecast): 1h forecast 429 근본수정 - 전경로 hasRain필터+inflight중복방지+429캐시버그+1000ms간격"
+  git commit -m "fix(forecast): 1h 예측 429 근본수정 - 전경로 hasRain필터(4곳)+inflight중복방지+429캐시버그+1000ms"
   if errorlevel 1 (
     echo [오류] 커밋 실패
     pause

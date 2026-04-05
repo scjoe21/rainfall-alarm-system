@@ -112,7 +112,8 @@ async function runAwsRefresh() {
             const prev = getPrevAwsGridRN1(`${nx},${ny}`);
             const rn15 = (prev != null && rn1 >= prev) ? +(rn1 - prev).toFixed(1) : 0;
             updateAwsGridRN1(`${nx},${ny}`, rn1);
-            const forecastHourly = await getVsrtForecastHourly(nx, ny);
+            const hasRain = rn15 > 0 || rn1 > 0;
+            const forecastHourly = hasRain ? await getVsrtForecastHourly(nx, ny) : 0;
             saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, rn15, forecastHourly, rn1);
             updated++;
           } catch (e) {
@@ -156,7 +157,8 @@ async function runAwsRefresh() {
               const prev = getPrevAwsGridRN1(`${nx},${ny}`);
               const rn15 = (prev != null && rn1 >= prev) ? +(rn1 - prev).toFixed(1) : 0;
               updateAwsGridRN1(`${nx},${ny}`, rn1);
-              const forecastHourly = await getVsrtForecastHourly(nx, ny);
+              const hasRain = rn15 > 0 || rn1 > 0;
+              const forecastHourly = hasRain ? await getVsrtForecastHourly(nx, ny) : 0;
               saveAwsRainfall(db, s.stn_id, s.name, s.lat, s.lon, rn15, forecastHourly, rn1);
               updated++;
             } catch (e) {
