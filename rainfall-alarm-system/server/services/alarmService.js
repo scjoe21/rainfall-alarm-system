@@ -159,10 +159,14 @@ export async function checkAlarmConditionForAwsStation(awsStation, preloadedReal
   const ny = preloadedNy ?? kma.convertToGrid(awsStation.lat, awsStation.lon).ny;
   const gridKey = `${nx},${ny}`;
 
-  // 1시간 예측치: 항상 조회·저장 (표시용, 눈/가벼운 비에서도 표시)
+  // 1시간 예측치: 강수 관측소만 API 호출, 비 없는 관측소는 0 저장
+  // 전 관측소 호출 시 ~400-450 고유 격자 × 1초 = 7-8분 burst → KMA 429 유발
+  const hasRain = realtime15min > 0 || (rainfall1hour !== null && rainfall1hour > 0);
   let forecastHourly;
   let forecastCalled = false;
-  if (gridKey in forecastCache) {
+  if (!hasRain) {
+    forecastHourly = 0;
+  } else if (gridKey in forecastCache) {
     forecastHourly = forecastCache[gridKey];
   } else {
     forecastHourly = await kma.getVsrtForecastHourly(nx, ny);

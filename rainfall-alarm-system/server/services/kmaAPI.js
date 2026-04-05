@@ -379,7 +379,10 @@ let forecast45minCache = null; // { baseKey, grid: Map<'nx,ny', number> }
 
 // 분당 호출 집중 → 429 방지용 마지막 공공 API 호출 타임스탬프
 let lastFcstApiCallMs = 0;
-// 실제 API 호출 사이 최소 간격 (FORECAST_API_MIN_INTERVAL_MS, 기본 500ms)
+// 동일 격자 동시 이중 호출 방지: inflight 중인 Promise 보관 (key = 'baseKey_nx,ny')
+let fcstInflight = new Map();
+
+// 실제 API 호출 사이 최소 간격 (FORECAST_API_MIN_INTERVAL_MS, 기본 1000ms)
 function getFcstApiIntervalMs() {
   const v = parseInt(process.env.FORECAST_API_MIN_INTERVAL_MS || '', 10);
   return Number.isFinite(v) && v >= 0 ? v : 1000;
@@ -388,6 +391,7 @@ function getFcstApiIntervalMs() {
 export function clearForecast45minCache() {
   forecast45minCache = null;
   lastFcstApiCallMs = 0;
+  fcstInflight.clear();
 }
 
 // 초단기예보 조회 - 45분 후까지의 예측 강수량 (RN1)
@@ -400,84 +404,101 @@ export async function getForecast45min(nx, ny) {
   const baseKey = `${baseDate}_${baseTime}`;
   const gridKey = `${nx},${ny}`;
 
-  // baseKey가 바뀌면 새 캐시 생성, 유지되면 기존 재사용
+  // baseKey가 바뀌면 새 캐시·inflight 초기화, 유지되면 기존 재사용
   if (!forecast45minCache || forecast45minCache.baseKey !== baseKey) {
     forecast45minCache = { baseKey, grid: new Map() };
-    lastFcstApiCallMs = 0; // 새 발표 시각이면 인터벌 리셋
+    lastFcstApiCallMs = 0;
+    fcstInflight.clear();
   }
 
   // 캐시 히트: 같은 baseKey 내 이미 조회된 격자이면 즉시 반환
   const cached = forecast45minCache.grid.get(gridKey);
   if (cached !== undefined) return cached;
 
-  // 분당 호출 수 제한: 직전 API 호출과 최소 간격을 둬서 KMA rate limit(429) 방지
-  const interval = getFcstApiIntervalMs();
-  if (interval > 0) {
-    const elapsed = Date.now() - lastFcstApiCallMs;
-    if (elapsed < interval) {
-      await new Promise(r => setTimeout(r, interval - elapsed));
-    }
-  }
-  lastFcstApiCallMs = Date.now();
+  // Inflight 중복 방지: 동일 격자에 동시 요청이 있으면 첫 번째 Promise 결과를 공유
+  // (runAwsRefresh + processAwsStations 동시 실행 시 이중 API 호출 방지)
+  const inflightKey = `${baseKey}_${gridKey}`;
+  const pending = fcstInflight.get(inflightKey);
+  if (pending) return pending;
 
-  try {
-    console.log(`  [API] getUltraSrtFcst: base=${baseDate} ${baseTime}, nx=${nx}, ny=${ny}`);
-
-    const data = await callKmaApi('getUltraSrtFcst', {
-      numOfRows: 200,
-      pageNo: 1,
-      dataType: 'JSON',
-      base_date: baseDate,
-      base_time: baseTime,
-      nx,
-      ny,
-    });
-
-    const body = data?.response?.body;
-    if (!body || !body.items) {
-      console.error(`  [API] No data returned for fcst (${nx},${ny})`);
-      console.error(`  [API] Response:`, JSON.stringify(data?.response?.header));
-      forecast45minCache.grid.set(gridKey, 0);
-      return 0;
-    }
-
-    const rawItems = body.items.item || [];
-    const items = Array.isArray(rawItems) ? rawItems : [rawItems];
-
-    const rnItems = items.filter(i => i.category === 'RN1');
-    const ptyItems = items.filter(i => i.category === 'PTY');
-
-    if (rnItems.length === 0) {
-      console.log(`  [API] No RN1 forecast items`);
-      forecast45minCache.grid.set(gridKey, 0);
-      return 0;
-    }
-
-    const firstRn1 = rnItems[0];
-    const matchingPty = ptyItems.find(
-      p => p.fcstDate === firstRn1.fcstDate && p.fcstTime === firstRn1.fcstTime
-    );
-    console.log(`  [API] Forecast PTY=${matchingPty?.fcstValue ?? 'N/A'} at ${firstRn1.fcstTime} for (${nx},${ny})`);
-
-    let total = 0;
-    if (firstRn1) {
-      const val = firstRn1.fcstValue;
-      if (val !== '강수없음' && val !== null) {
-        total = parseFloat(val) || 0;
+  const promise = (async () => {
+    try {
+      // 분당 호출 수 제한: 직전 API 호출과 최소 간격을 둬서 KMA rate limit(429) 방지
+      const interval = getFcstApiIntervalMs();
+      if (interval > 0) {
+        const elapsed = Date.now() - lastFcstApiCallMs;
+        if (elapsed < interval) {
+          await new Promise(r => setTimeout(r, interval - elapsed));
+        }
       }
-    }
+      lastFcstApiCallMs = Date.now();
 
-    console.log(`  [API] Forecast RN1=${total}mm for (${nx},${ny})`);
-    const result = +total.toFixed(1);
-    forecast45minCache.grid.set(gridKey, result);
-    return result;
-  } catch (err) {
-    console.error(`  [API] Ultra short fcst error:`, err.message);
-    if (forecast45minCache) {
-      forecast45minCache.grid.set(gridKey, 0);
+      console.log(`  [API] getUltraSrtFcst: base=${baseDate} ${baseTime}, nx=${nx}, ny=${ny}`);
+
+      const data = await callKmaApi('getUltraSrtFcst', {
+        numOfRows: 200,
+        pageNo: 1,
+        dataType: 'JSON',
+        base_date: baseDate,
+        base_time: baseTime,
+        nx,
+        ny,
+      });
+
+      const body = data?.response?.body;
+      if (!body || !body.items) {
+        console.error(`  [API] No data returned for fcst (${nx},${ny})`);
+        console.error(`  [API] Response:`, JSON.stringify(data?.response?.header));
+        if (forecast45minCache) forecast45minCache.grid.set(gridKey, 0);
+        return 0;
+      }
+
+      const rawItems = body.items.item || [];
+      const items = Array.isArray(rawItems) ? rawItems : [rawItems];
+
+      const rnItems = items.filter(i => i.category === 'RN1');
+      const ptyItems = items.filter(i => i.category === 'PTY');
+
+      if (rnItems.length === 0) {
+        console.log(`  [API] No RN1 forecast items`);
+        if (forecast45minCache) forecast45minCache.grid.set(gridKey, 0);
+        return 0;
+      }
+
+      const firstRn1 = rnItems[0];
+      const matchingPty = ptyItems.find(
+        p => p.fcstDate === firstRn1.fcstDate && p.fcstTime === firstRn1.fcstTime
+      );
+      console.log(`  [API] Forecast PTY=${matchingPty?.fcstValue ?? 'N/A'} at ${firstRn1.fcstTime} for (${nx},${ny})`);
+
+      let total = 0;
+      if (firstRn1) {
+        const val = firstRn1.fcstValue;
+        if (val !== '강수없음' && val !== null) {
+          total = parseFloat(val) || 0;
+        }
+      }
+
+      console.log(`  [API] Forecast RN1=${total}mm for (${nx},${ny})`);
+      const result = +total.toFixed(1);
+      if (forecast45minCache) forecast45minCache.grid.set(gridKey, result);
+      return result;
+    } catch (err) {
+      console.error(`  [API] Ultra short fcst error:`, err.message);
+      // 429 쿨다운 에러는 캐시에 0 저장 안 함: 쿨다운(10분) 해제 후 재시도 가능하게 유지
+      // 그 외(파싱 오류 등) 정상 응답이지만 데이터 없음은 0으로 캐시하여 무한 재시도 방지
+      const isRateLimited = err.message?.includes('rate limited') || err.response?.status === 429;
+      if (!isRateLimited && forecast45minCache) {
+        forecast45minCache.grid.set(gridKey, 0);
+      }
+      return 0;
+    } finally {
+      fcstInflight.delete(inflightKey);
     }
-    return 0;
-  }
+  })();
+
+  fcstInflight.set(inflightKey, promise);
+  return promise;
 }
 
 // ─────────────────────────────────────────────────────────────

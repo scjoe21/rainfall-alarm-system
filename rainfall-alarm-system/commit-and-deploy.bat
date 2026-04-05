@@ -9,7 +9,7 @@ git add -A
 git status
 git diff --cached --quiet
 if errorlevel 1 (
-  git commit -m "feat(rainfall-alarm): VSRT API허브 1시간 예측, 공공 API 429 쿨다운, 스케줄러 VSRT 프리패치"
+  git commit -m "fix(forecast): 1h forecast 429 근본수정 - 전경로 hasRain필터+inflight중복방지+429캐시버그+1000ms간격"
   if errorlevel 1 (
     echo [오류] 커밋 실패
     pause
