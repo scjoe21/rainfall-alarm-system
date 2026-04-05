@@ -202,6 +202,32 @@ export async function initDatabase() {
     db.exec('ALTER TABLE aws_rainfall ADD COLUMN rainfall_1hour REAL');
   } catch (_) { /* 이미 있으면 무시 */ }
 
+  // 세종 신도심 weather_stations 재매핑: 세종(360, 36.48, 127.259) → 세종고운(494, 36.531, 127.240)
+  // 신도심 14개 읍면동이 신도심 남쪽 관측소(360)에만 매핑되어 있어 신도심 강수 미반영 문제 해결
+  try {
+    const SEJONG_URBAN_EMDS = [
+      '한솔동','새롬동','도담동','아름동','종촌동','고운동',
+      '보람동','대평동','소담동','반곡동','다정동','해밀동','나성동','어진동',
+    ];
+    const placeholders = SEJONG_URBAN_EMDS.map(() => '?').join(',');
+    const toUpdate = db.prepare(`
+      SELECT ws.id FROM weather_stations ws
+      JOIN emds e ON ws.emd_id = e.id
+      JOIN districts d ON e.district_id = d.id
+      WHERE d.metro_id = 8 AND ws.stn_id = '360'
+        AND e.name IN (${placeholders})
+    `).all(...SEJONG_URBAN_EMDS);
+    if (toUpdate.length > 0) {
+      const update = db.prepare(
+        "UPDATE weather_stations SET stn_id='494', name='세종고운', lat=36.53083, lon=127.24028 WHERE id=?"
+      );
+      for (const ws of toUpdate) update.run(ws.id);
+      console.log(`DB마이그: 세종 신도심 ${toUpdate.length}개 weather_stations → 세종고운(494, 36.531°N, 127.240°E)`);
+    }
+  } catch (e) {
+    console.warn('세종 신도심 마이그레이션 실패:', e.message);
+  }
+
   console.log('Database initialized');
   return db;
 }

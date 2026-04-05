@@ -9,7 +9,7 @@ git add -A
 git status
 git diff --cached --quiet
 if errorlevel 1 (
-  git commit -m "fix(forecast): 1h 예측 429 근본수정 - 전경로 hasRain필터(4곳)+inflight중복방지+429캐시버그+1000ms"
+  git commit -m "fix(sejong): 세종 신도심 14개 읍면동 관측소 재매핑 세종(360)→세종고운(494) + DB 자동 마이그레이션"
   if errorlevel 1 (
     echo [오류] 커밋 실패
     pause

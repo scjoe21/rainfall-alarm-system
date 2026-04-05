@@ -459,13 +459,14 @@ function mergeSharedStationEmds(db, emdMap, emdGeometries) {
  * - 가짜(G-시리즈) 관측소 제거, 실제 관측소 복제하여 1:1 매핑
  */
 function fixSejongStations(db, emdGeometries) {
-  // 실제 KMA 세종 관측소
+  // 실제 KMA 세종 관측소 (세종고운 494: 신도심 중앙, 14개 신도심 읍면동 대표)
   const REAL_SEJONG_STATIONS = [
-    { stn_id: '360', name: '세종',  lat: 36.4800, lon: 127.2590 },
-    { stn_id: '861', name: '조치원', lat: 36.6010, lon: 127.0010 },
-    { stn_id: '862', name: '연기',  lat: 36.5560, lon: 127.0340 },
-    { stn_id: '863', name: '부강',  lat: 36.5270, lon: 127.1440 },
-    { stn_id: '864', name: '금남',  lat: 36.4700, lon: 127.0800 },
+    { stn_id: '494', name: '세종고운', lat: 36.53083, lon: 127.24028 },
+    { stn_id: '360', name: '세종',    lat: 36.4800,  lon: 127.2590  },
+    { stn_id: '861', name: '조치원',  lat: 36.6010,  lon: 127.0010  },
+    { stn_id: '862', name: '연기',    lat: 36.5560,  lon: 127.0340  },
+    { stn_id: '863', name: '부강',    lat: 36.5270,  lon: 127.1440  },
+    { stn_id: '864', name: '금남',    lat: 36.4700,  lon: 127.0800  },
   ];
 
   // 이름 기반 우선 매핑 (읍면동 이름 → station stn_id)

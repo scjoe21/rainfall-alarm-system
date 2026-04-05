@@ -74,7 +74,7 @@ function scheduleAwsRefresh(delayMs) {
 // fetchAllAwsData()로 전국 AWS 자료를 캐시에 올린 뒤,
 // aws_rainfall 테이블에 관측소별 15분 강수량 갱신.
 // 폴백 시 우선 처리할 관측소 (세종·조치원·대전 등 비가 와도 수치가 안 나오던 지역)
-const FALLBACK_PRIORITY_STN_IDS = ['360', '861', '133', '232', '131', '108', '119', '112'];
+const FALLBACK_PRIORITY_STN_IDS = ['494', '360', '861', '133', '232', '131', '108', '119', '112'];
 
 async function runAwsRefresh() {
   try {
