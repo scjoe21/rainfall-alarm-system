@@ -46,8 +46,7 @@ function App() {
           {!selectedMetro ? (
             /* 초기 화면: 측정 주기 안내 배지 */
             <span className="text-right text-xs text-blue-200 leading-snug">
-              호우특보지역 <span className="text-white font-semibold">5분</span> 단위 측정<br />
-              <span className="text-blue-300">(특보 없는 지역은 <span className="text-blue-100 font-medium">30분</span> 단위)</span>
+              호우특보지역 <span className="text-white font-semibold">5분</span> 단위 측정
             </span>
           ) : (
             <button
