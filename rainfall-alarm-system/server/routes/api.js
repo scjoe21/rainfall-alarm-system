@@ -10,7 +10,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const router = Router();
-const MAX_LIMIT = 100;
+const MAX_LIMIT = 500;
 
 // API/연결 진단 (실측치 미표시 시 원인 파악용)
 router.get('/status', async (req, res) => {

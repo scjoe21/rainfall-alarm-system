@@ -367,7 +367,7 @@ async function processAwsStations(label) {
   // 오래된 데이터 정리
   try {
     const db = await getDatabase();
-    db.prepare("DELETE FROM aws_alarm_logs WHERE timestamp < datetime('now', '-1 hour')").run();
+    db.prepare("DELETE FROM aws_alarm_logs WHERE timestamp < datetime('now', '-90 days')").run();
     db.prepare("DELETE FROM rainfall_realtime WHERE timestamp < datetime('now', '-1 hour')").run();
     db.prepare("DELETE FROM rainfall_forecast WHERE base_time < datetime('now', '-1 hour')").run();
   } catch (cleanupErr) {

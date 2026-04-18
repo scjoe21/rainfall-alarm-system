@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import MetroSelector from './components/MetroSelector';
 import DistrictSelector from './components/DistrictSelector';
 import EmdMap from './components/EmdMap';
 import AlarmList from './components/AlarmList';
+import AdminHistory from './components/AdminHistory';
 
 // 세종시는 기초자치단체 없이 바로 지도 표시
 const DIRECT_MAP_METROS = { '36': true }; // 세종
@@ -11,6 +12,45 @@ function App() {
   const [selectedMetro, setSelectedMetro] = useState(null);
   const [selectedDistrict, setSelectedDistrict] = useState(null);
   const [directMapMode, setDirectMapMode] = useState(false);
+
+  // 운영자 모드
+  const titleClickCount = useRef(0);
+  const titleClickTimer = useRef(null);
+  const [showPwModal, setShowPwModal] = useState(false);
+  const [pwInput, setPwInput] = useState('');
+  const [pwError, setPwError] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(
+    () => sessionStorage.getItem('adminAuth') === '1'
+  );
+
+  const handleTitleClick = () => {
+    titleClickCount.current += 1;
+    clearTimeout(titleClickTimer.current);
+    if (titleClickCount.current >= 3) {
+      titleClickCount.current = 0;
+      setShowPwModal(true);
+      setPwInput('');
+      setPwError(false);
+    } else {
+      titleClickTimer.current = setTimeout(() => { titleClickCount.current = 0; }, 800);
+    }
+  };
+
+  const handlePwSubmit = (e) => {
+    e.preventDefault();
+    if (pwInput === '2100') {
+      sessionStorage.setItem('adminAuth', '1');
+      setShowAdmin(true);
+      setShowPwModal(false);
+    } else {
+      setPwError(true);
+    }
+  };
+
+  const handleAdminClose = () => {
+    setShowAdmin(false);
+    sessionStorage.removeItem('adminAuth');
+  };
 
   const handleMetroSelect = (metro) => {
     setSelectedMetro(metro);
@@ -37,10 +77,46 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-100">
+      {/* 비밀번호 모달 */}
+      {showPwModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center">
+          <form
+            onSubmit={handlePwSubmit}
+            className="bg-white rounded-xl shadow-2xl p-8 flex flex-col gap-4 w-72"
+          >
+            <h2 className="text-base font-bold text-gray-800 text-center">운영자 인증</h2>
+            <input
+              autoFocus
+              type="password"
+              value={pwInput}
+              onChange={e => { setPwInput(e.target.value); setPwError(false); }}
+              placeholder="비밀번호"
+              className="border rounded-lg px-4 py-2 text-center text-lg tracking-widest outline-none focus:border-blue-500"
+            />
+            {pwError && <p className="text-red-500 text-sm text-center">비밀번호가 틀렸습니다.</p>}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setShowPwModal(false)}
+                className="flex-1 py-2 rounded-lg border text-gray-500 hover:bg-gray-50"
+              >취소</button>
+              <button
+                type="submit"
+                className="flex-1 py-2 rounded-lg bg-blue-700 text-white hover:bg-blue-600"
+              >확인</button>
+            </div>
+          </form>
+        </div>
+      )}
+      {/* 운영자 이력 오버레이 */}
+      {showAdmin && <AdminHistory onClose={handleAdminClose} />}
       {/* Header */}
       <header className="bg-blue-700 text-white shadow-lg">
         <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between gap-3">
-          <h1 className="text-xl font-bold whitespace-nowrap">
+          <h1
+            className="text-xl font-bold whitespace-nowrap cursor-default select-none"
+            onClick={handleTitleClick}
+          >
             주민대피 알람
           </h1>
           {!selectedMetro ? (
